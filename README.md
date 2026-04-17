@@ -1,53 +1,36 @@
 # ebo_seg
 
-Scripts minimalistes pour entrainer un U-Net sur un dataset de segmentation stocke dans le `scratch`.
+Minimal scripts to train a U-Net on a segmentation dataset stored in scratch.
 
-## Structure attendue du dataset
+## Dataset structure
 
-Le script attend une arborescence de ce type :
-
-```text
 DATASET_ROOT/
   train/
     images/
-      sample_001.png
-      sample_002.png
     masks/
-      sample_001.png
-      sample_002.png
   val/
     images/
-      sample_101.png
     masks/
-      sample_101.png
-```
 
-Contraintes :
+Each image must have a mask with the same filename.
 
-- chaque image doit avoir un masque avec le meme nom de fichier
-- segmentation binaire : masques en `0/1` ou `0/255`
-- segmentation multi-classe : masques avec labels entiers `0..num_classes-1`
+Binary segmentation: masks are 0/1 or 0/255  
+Multi-class segmentation: masks are integer labels (0..num_classes-1)
 
-## Lancement rapide
+## Run training
 
-```bash
 bash train_unet_scratch.sh
-```
 
-## Exemple avec chemins explicites
+## Example
 
-```bash
-DATASET_ROOT=/home/guibo/links/scratch/datasets/mon_dataset \
-OUTPUT_DIR=/home/guibo/links/scratch/models/ebo_seg_unet \
+DATASET_ROOT=/path/to/data \
+OUTPUT_DIR=/path/to/output \
 NUM_CLASSES=1 \
 EPOCHS=50 \
 BATCH_SIZE=8 \
 LR=1e-3 \
 bash train_unet_scratch.sh
-```
 
 ## Slurm
 
-```bash
 sbatch slurm_train_unet.sh
-```
