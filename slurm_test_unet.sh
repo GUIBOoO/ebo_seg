@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=00:10:00
+#SBATCH --time=01:10:00
 #SBATCH --partition=compute_full_node
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -14,28 +14,55 @@ source /home/guibo/ebo-seg/bin/activate
 
 set -euo pipefail
 
-DATA_DIR=$SLURM_TMPDIR/dataset/ACDC/database
-mkdir -p "$DATA_DIR"
+DATASET="${DATASET:-brats}"
+DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
-ACDC_ZIP=$SCRATCH/datasets/ACDC/ACDC.zip
-
-BRATS_SIP=$SCRATCH/datasets/Brats/Brats.zip
-
-
-if [ ! -f "$ACDC_ZIP" ]; then
-    echo "ERROR: image zip not found"
+case "$DATASET_LOWER" in
+  acdc)
+    DATA_DIR="$SLURM_TMPDIR/dataset/ACDC/database"
+    DATASET_ZIP="$SCRATCH/datasets/ACDC/ACDC.zip"
+    UNZIP_TARGET="$SLURM_TMPDIR/dataset"
+    ;;
+  brats)
+    DATA_DIR="$SCRATCH/datasets/Brats/data_slices"
+    ;;
+  *)
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc' or 'brats'."
     exit 1
-fi
+    ;;
+esac
 
-echo "Décompression ACDC images..."
-unzip -q "$ACDC_ZIP" -d "$SLURM_TMPDIR/dataset"
+if [ "$DATASET_LOWER" = "acdc" ]; then
+    mkdir -p "$DATA_DIR"
+
+    if [ ! -f "$DATASET_ZIP" ]; then
+        echo "ERROR: ACDC zip not found"
+        exit 1
+    fi
+
+    echo "Décompression ACDC images..."
+    unzip -q "$DATASET_ZIP" -d "$UNZIP_TARGET"
+else
+    if [ ! -d "$DATA_DIR" ]; then
+        echo "ERROR: prepared BraTS directory not found at $DATA_DIR"
+        exit 1
+    fi
+fi
 
 export PYTHON_DATA_DIR="$DATA_DIR"
 DATASET_ROOT="${DATASET_ROOT:-$DATA_DIR}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-CHECKPOINT="${CHECKPOINT:-/home/guibo/links/scratch/models/ebo_seg/ebo_seg_unet_25_5_2in_1cor/best_ebo_ce.pt}"
-OUTPUT_DIR="${OUTPUT_DIR:-/home/guibo/links/scratch/inference/inference_ebo_ce_dice_25_2in_1cor}"
+if [ "$DATASET_LOWER" = "acdc" ]; then
+    DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/acdc/ebo_17_5_in0p3/best_ebo_ce.pt"
+    DEFAULT_OUTPUT_DIR="/home/guibo/links/scratch/inference/acdc/inference_ebo_ce_17_5_in0p3"
+else
+    DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/brats/ebo_17_5_0p3in/best_ebo_ce.pt"
+    DEFAULT_OUTPUT_DIR="/home/guibo/links/scratch/inference/brats/inference_ebo_ce_17_5_0p3in"
+fi
+
+CHECKPOINT="${CHECKPOINT:-$DEFAULT_CHECKPOINT}"
+OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 DEVICE="${DEVICE:-cuda}"
 NUM_SAMPLES="${NUM_SAMPLES:-4}"
@@ -47,6 +74,7 @@ MODES="${MODES:-all}"
 cd /home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg
 
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
+echo "Dataset      : ${DATASET_LOWER}"
 echo "Dataset root : ${DATASET_ROOT}"
 echo "Checkpoint   : ${CHECKPOINT}"
 echo "Output dir   : ${OUTPUT_DIR}"
@@ -54,6 +82,7 @@ echo "Modes        : ${MODES}"
 
 "${PYTHON_BIN}" inference.py ${MODES} \
   --checkpoint "${CHECKPOINT}" \
+  --dataset "${DATASET_LOWER}" \
   --dataset-root "${DATASET_ROOT}" \
   --output-dir "${OUTPUT_DIR}" \
   --batch-size "${BATCH_SIZE}" \

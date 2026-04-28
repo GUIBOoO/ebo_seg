@@ -32,7 +32,14 @@ def compute_binary_metrics(logits: torch.Tensor, targets: torch.Tensor) -> Tuple
 
 
 def compute_multiclass_metrics(logits: torch.Tensor, targets: torch.Tensor, num_classes: int) -> Tuple[float, float, float]:
+
+    if targets.ndim == 4 and targets.shape[1] == 1:
+        targets = targets.squeeze(1)
+
     preds = torch.argmax(logits, dim=1)
+
+    if preds.shape != targets.shape:
+        raise ValueError(f"Shape mismatch: preds={preds.shape}, targets={targets.shape}")
     total = targets.numel()
     correct = (preds == targets).sum().item()
     pixel_acc = correct / total

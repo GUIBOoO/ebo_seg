@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils import energy as energy_fn
-
+from utils import energy as energy_fn, hybrid_energy
 
 class DiceLoss(nn.Module):
     def __init__(self, num_classes, smooth=1e-5):
@@ -44,7 +43,7 @@ class EBOLoss(nn.Module):
     def __init__(
         self,
         base_loss: nn.Module,
-        lambda_ebo_in: float = 1000,
+        lambda_ebo_in: float = 0.1,
         lambda_ebo_corr: float = 0.1,
         margin_correct: float = -25.0,
         margin_miss: float = -5.0,
@@ -58,10 +57,47 @@ class EBOLoss(nn.Module):
         self.margin_miss = margin_miss
         self.temperature = temperature
 
-    def forward(self, logits, targets):
+    def forward(self, logits, targets, image=None):
         base = self.base_loss(logits, targets)
 
         energy = energy_fn(logits, self.temperature)
+        pred = torch.argmax(logits, dim=1)
+        correct_mask = pred == targets
+
+        ebo_correct = F.relu(energy - self.margin_correct) ** 2
+        ebo_in = F.relu(self.margin_miss - energy) ** 2
+
+        ebo = torch.where(
+            correct_mask,
+            self.lambda_ebo_corr * ebo_correct,
+            self.lambda_ebo_in * ebo_in,
+        )
+
+        return base + ebo.mean()
+
+
+class HybridEBOLoss(nn.Module):
+    def __init__(
+        self,
+        base_loss: nn.Module,
+        lambda_ebo_in: float = 0.1,
+        lambda_ebo_corr: float = 0.1,
+        margin_correct: float = -25.0,
+        margin_miss: float = -5.0,
+        temperature: float = 1.0,
+    ):
+        super().__init__()
+        self.base_loss = base_loss
+        self.lambda_ebo_in = lambda_ebo_in
+        self.lambda_ebo_corr = lambda_ebo_corr
+        self.margin_correct = margin_correct
+        self.margin_miss = margin_miss
+        self.temperature = temperature
+
+    def forward(self, logits, targets, image):
+        base = self.base_loss(logits, targets)
+
+        energy = hybrid_energy(logits, image, T=self.temperature)
         pred = torch.argmax(logits, dim=1)
         correct_mask = pred == targets
 
@@ -101,6 +137,17 @@ def build_loss(
         if num_classes < 2:
             raise ValueError('ebo_cross_entropy requires num_classes >= 2')
         return EBOLoss(
+            CEDiceLoss(num_classes),
+            lambda_ebo_in=lambda_ebo_in,
+            lambda_ebo_corr=lambda_ebo_corr,
+            margin_correct=margin_correct,
+            margin_miss=margin_miss,
+        )
+
+    if loss_name in {'hybrid_ebo_ce', 'hybrid_ebo_cross_entropy'}:
+        if num_classes < 2:
+            raise ValueError('hybrid_ebo_cross_entropy requires num_classes >= 2')
+        return HybridEBOLoss(
             CEDiceLoss(num_classes),
             lambda_ebo_in=lambda_ebo_in,
             lambda_ebo_corr=lambda_ebo_corr,

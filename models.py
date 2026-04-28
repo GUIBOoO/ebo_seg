@@ -73,10 +73,19 @@ class UNet(nn.Module):
         return self.head(x)
 
 
-def build_model(model_name: str, num_classes: int) -> nn.Module:
+def build_model_acdc(model_name: str, num_classes: int) -> nn.Module:
     model_name = model_name.lower()
     if model_name != "unet":
         raise ValueError(f"Unsupported model: {model_name}")
 
     out_channels = 1 if num_classes == 1 else num_classes
     return UNet(in_channels=1, out_channels=out_channels)
+
+
+def build_model_brats(model_name: str, num_classes: int) -> nn.Module:
+    model_name = model_name.lower()
+    if model_name != "unet":
+        raise ValueError(f"Unsupported model: {model_name}")
+
+    out_channels = 1 if num_classes == 1 else num_classes
+    return UNet(in_channels=4, out_channels=out_channels)

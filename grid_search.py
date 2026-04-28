@@ -10,6 +10,7 @@ import optuna
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Grid search Optuna pour les hyperparametres EBO.')
+    parser.add_argument('--dataset', type=str, choices=['acdc', 'brats'], default=None)
     parser.add_argument('--dataset-root', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--model', type=str, default='unet')
@@ -95,6 +96,7 @@ def main() -> None:
         command = [
             args.python_bin,
             str(script_path),
+            '--dataset', args.dataset,
             '--dataset-root', str(args.dataset_root),
             '--output-dir', str(trial_dir),
             '--model', args.model,
@@ -112,6 +114,8 @@ def main() -> None:
             '--margin-correct', str(margin_correct),
             '--margin-miss', str(margin_miss),
         ]
+
+        command = [arg for arg in command if arg is not None]
 
         print(f'[{trial.number + 1}/{total_trials}] Lancement: {trial_name}')
         subprocess.run(command, check=True, cwd=script_path.parent)
@@ -134,6 +138,10 @@ def main() -> None:
 
     study.optimize(objective, n_trials=total_trials)
 
+    completed_trials = [trial for trial in study.trials if trial.value is not None]
+    if not completed_trials:
+        raise RuntimeError('Aucun essai complete dans la grid search.')
+
     results = []
     for trial in study.trials:
         result = {
@@ -143,6 +151,7 @@ def main() -> None:
             'state': trial.state.name,
             'trial_dir': trial.user_attrs.get('trial_dir'),
             'val_metrics': trial.user_attrs.get('val_metrics'),
+            'command': trial.user_attrs.get('command'),
         }
         results.append(result)
 

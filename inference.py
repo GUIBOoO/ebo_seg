@@ -12,13 +12,13 @@ import torch
 import tqdm
 from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 
-from datasets import get_dataloaders
+from datasets import get_dataloaders, infer_dataset_type
 from metrics import compute_binary_metrics, compute_multiclass_metrics
-from models import build_model
-from utils import SIRC, doctor, energy
+from models import build_model_acdc, build_model_brats
+from utils import SIRC, doctor, energy, hybrid_energy
 
 
-SCORE_NAMES = ("msp", "alpha", "beta", "energy", "sirc")
+SCORE_NAMES = ("msp", "alpha", "beta", "energy", "hybrid_energy", "sirc")
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -40,6 +40,13 @@ def build_argparser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Dataset root. Defaults to PYTHON_DATA_DIR if set.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=["acdc", "brats"],
+        default=None,
+        help="Dataset name. If omitted, inferred from the checkpoint args or dataset root.",
     )
     parser.add_argument(
         "--output-dir",
@@ -74,17 +81,24 @@ def _to_numpy_image(image: torch.Tensor) -> np.ndarray:
     image = image.detach().cpu().float()
     if image.ndim == 3 and image.shape[0] == 1:
         return image[0].numpy()
-    if image.ndim == 3:
+    if image.ndim == 3 and image.shape[0] == 3:
         return image.permute(1, 2, 0).numpy()
+    if image.ndim == 3:
+        return image[0].numpy()
     return image.numpy()
 
 
 
-def _compute_score_maps(logits: torch.Tensor, temperature: float) -> Dict[str, torch.Tensor]:
+def _compute_score_maps(
+    logits: torch.Tensor,
+    images: torch.Tensor,
+    temperature: float,
+) -> Dict[str, torch.Tensor]:
     softmax = torch.softmax(logits, dim=1)
     msp = torch.max(softmax, dim=1).values
     alpha, beta = doctor(softmax)
     energy_map = energy(logits, temperature)
+    hybrid_energy_map = hybrid_energy(logits, images, T=temperature)
     sirc = SIRC(msp, 1, energy_map, b=1, a=1)
 
     return {
@@ -92,6 +106,7 @@ def _compute_score_maps(logits: torch.Tensor, temperature: float) -> Dict[str, t
         "alpha": alpha,
         "beta": beta,
         "energy": energy_map,
+        "hybrid_energy": hybrid_energy_map,
         "sirc": -sirc,
     }
 
@@ -108,13 +123,20 @@ def _compute_detection_metrics(labels: np.ndarray, scores: np.ndarray) -> Dict[s
 
 
 
-def load_checkpoint_model(checkpoint_path: Path, device: torch.device) -> Tuple[torch.nn.Module, dict]:
+def load_checkpoint_model(
+    checkpoint_path: Path,
+    device: torch.device,
+    dataset_name: str,
+) -> Tuple[torch.nn.Module, dict]:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     train_args = checkpoint.get("args", {})
     model_name = train_args.get("model", "unet")
     num_classes = int(train_args.get("num_classes", 1))
 
-    model = build_model(model_name, num_classes)
+    if dataset_name == "acdc":
+        model = build_model_acdc(model_name, num_classes)
+    else:
+        model = build_model_brats(model_name, num_classes)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device).eval()
     return model, train_args
@@ -150,7 +172,13 @@ def evaluate(
             else:
                 dice, iou, pixel_acc = compute_multiclass_metrics(logits, masks, num_classes)
 
-            scores = _compute_score_maps(logits, temperature)
+            scores = _compute_score_maps(logits, images, temperature)
+            for name, tensor in scores.items():
+                arr = tensor.detach().cpu().numpy()
+                if not np.isfinite(arr).all():
+                    print(f"[NaN DETECTED] score: {name}")
+                    print("NaN:", np.isnan(arr).sum(), "Inf:", np.isinf(arr).sum())
+                    print("Min:", np.nanmin(arr), "Max:", np.nanmax(arr))
             error_map = (preds != masks).long()
 
             total_dice += dice
@@ -254,14 +282,14 @@ def save_visualizations(per_sample: Iterable[dict], output_dir: Path, num_sample
     vis_dir = output_dir / "visualizations"
     vis_dir.mkdir(parents=True, exist_ok=True)
 
-    score_order = ["msp", "alpha", "beta", "energy", "sirc"]
+    score_order = ["msp", "alpha", "beta", "energy", "hybrid_energy", "sirc"]
     for sample in list(per_sample)[:num_samples]:
         image = _to_numpy_image(sample["image"])
         mask = sample["mask"].numpy()
         pred = sample["pred"].numpy()
         error = sample["error"].numpy()
 
-        fig, axes = plt.subplots(2, 5, figsize=(20, 8))
+        fig, axes = plt.subplots(3, 4, figsize=(20, 12))
         axes = axes.flatten()
 
         axes[0].imshow(image, cmap="gray" if image.ndim == 2 else None)
@@ -276,17 +304,17 @@ def save_visualizations(per_sample: Iterable[dict], output_dir: Path, num_sample
         axes[3].imshow(error, cmap="gray")
         axes[3].set_title("Error")
 
-        for axis, score_name in zip(axes[4:8], score_order):
+        for axis, score_name in zip(axes[4:10], score_order):
             axis.imshow(sample["scores"][score_name].numpy(), cmap="viridis")
             axis.set_title(score_name.upper())
 
         energy = sample["scores"]["energy"].numpy()
         high_energy = (energy > energy_threshold).astype(np.uint8)
 
-        axes[8].imshow(high_energy, cmap="gray")
-        axes[8].set_title(f"Energy > {energy_threshold}")
+        axes[10].imshow(high_energy, cmap="gray")
+        axes[10].set_title(f"Energy > {energy_threshold}")
 
-        axes[9].axis("off")
+        axes[11].axis("off")
 
         plt.tight_layout()
         save_path = vis_dir / f"sample_{sample['sample_id']:04d}.png"
@@ -303,8 +331,6 @@ def main() -> None:
         modes = {"metrics", "distrib", "visu"}
 
     device = resolve_device(args.device)
-    model, train_args = load_checkpoint_model(args.checkpoint, device)
-    num_classes = int(train_args.get("num_classes", 1))
 
     dataset_root = args.dataset_root
     if dataset_root is None:
@@ -313,11 +339,24 @@ def main() -> None:
             raise ValueError("Dataset root is required. Pass --dataset-root or set PYTHON_DATA_DIR.")
         dataset_root = Path(dataset_root_env)
 
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    train_args = checkpoint.get("args", {})
+    dataset_name = infer_dataset_type(
+        base_dir=dataset_root,
+        dataset=args.dataset or train_args.get("dataset"),
+    )
+    num_classes = int(train_args.get("num_classes", 1))
+    model, train_args = load_checkpoint_model(args.checkpoint, device, dataset_name)
+
     default_output_dir = args.checkpoint.parent / f"inference_{args.checkpoint.stem}"
     output_dir = args.output_dir or default_output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    _, _, test_loader = get_dataloaders(base_dir=str(dataset_root), batch_size=args.batch_size)
+    _, _, test_loader = get_dataloaders(
+        dataset=dataset_name,
+        base_dir=str(dataset_root),
+        batch_size=args.batch_size,
+    )
 
     segmentation_metrics, score_arrays, per_sample = evaluate(
         model=model,
@@ -329,6 +368,7 @@ def main() -> None:
 
     run_metadata = {
         "checkpoint": str(args.checkpoint),
+        "dataset": dataset_name,
         "dataset_root": str(dataset_root),
         "device": str(device),
         "batch_size": args.batch_size,
