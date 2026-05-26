@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=01:10:00
+#SBATCH --time=00:10:00
 #SBATCH --partition=compute_full_node
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -14,7 +14,7 @@ source /home/guibo/ebo-seg/bin/activate
 
 set -euo pipefail
 
-DATASET="${DATASET:-brats}"
+DATASET="${DATASET:-acdc}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 case "$DATASET_LOWER" in
@@ -54,11 +54,11 @@ DATASET_ROOT="${DATASET_ROOT:-$DATA_DIR}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 if [ "$DATASET_LOWER" = "acdc" ]; then
-    DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/acdc/ebo_17_5_in0p3/best_ebo_ce.pt"
-    DEFAULT_OUTPUT_DIR="/home/guibo/links/scratch/inference/acdc/inference_ebo_ce_17_5_in0p3"
+    DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/acdc/3boundlogebo_10_5_outin5_cenin2/best_bound_log_ebo.pt"
+    DEFAULT_OUTPUT_DIR="/home/guibo/links/scratch/inference/acdc/inference_3boundlogebo_10_5_outin5_cenin2"
 else
-    DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/brats/ebo_17_5_0p3in/best_ebo_ce.pt"
-    DEFAULT_OUTPUT_DIR="/home/guibo/links/scratch/inference/brats/inference_ebo_ce_17_5_0p3in"
+    DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/brats/hybridebo_17_5_2in/best_hybrid_ebo_ce.pt"
+    DEFAULT_OUTPUT_DIR="/home/guibo/links/scratch/inference/brats/inference_hybridebo_ce_17_5_2in"
 fi
 
 CHECKPOINT="${CHECKPOINT:-$DEFAULT_CHECKPOINT}"
@@ -68,7 +68,8 @@ DEVICE="${DEVICE:-cuda}"
 NUM_SAMPLES="${NUM_SAMPLES:-4}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 MAX_PIXELS_KDE="${MAX_PIXELS_KDE:-200000}"
-ENERGY_THRESH="${ENERGY_THRESH:--21}"
+ENERGY_THRESH="${ENERGY_THRESH:--5}"
+MSP_THRESH="${MSP_THRESH:-0.999}"
 MODES="${MODES:-all}"
 
 cd /home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg
@@ -79,6 +80,8 @@ echo "Dataset root : ${DATASET_ROOT}"
 echo "Checkpoint   : ${CHECKPOINT}"
 echo "Output dir   : ${OUTPUT_DIR}"
 echo "Modes        : ${MODES}"
+echo "Energy thr   : ${ENERGY_THRESH}"
+echo "MSP thr      : ${MSP_THRESH}"
 
 "${PYTHON_BIN}" inference.py ${MODES} \
   --checkpoint "${CHECKPOINT}" \
@@ -90,4 +93,5 @@ echo "Modes        : ${MODES}"
   --num-samples "${NUM_SAMPLES}" \
   --temperature "${TEMPERATURE}" \
   --max-pixels-kde "${MAX_PIXELS_KDE}" \
-  --energy-threshold "${ENERGY_THRESH}"
+  --energy-threshold "${ENERGY_THRESH}" \
+  --msp-threshold "${MSP_THRESH}"

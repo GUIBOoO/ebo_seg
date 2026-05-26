@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=05:00:00
+#SBATCH --time=10:00:00
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --output=/scratch/guibo/slurm_outputs/slurm-%j.out
@@ -55,7 +55,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$SCRATCH/grid_search}"
 PYTHON_SCRIPT="${PYTHON_SCRIPT:-grid_search.py}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 MODEL="${MODEL:-unet}"
-LOSS="${LOSS:-ebo_ce}"
+LOSS="${LOSS:-bound_log_ebo}"
 EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 LR="${LR:-1e-3}"
@@ -64,19 +64,32 @@ IMAGE_SIZE="${IMAGE_SIZE:-256}"
 NUM_CLASSES="${NUM_CLASSES:-$DEFAULT_NUM_CLASSES}"
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-cuda}"
-METRIC="${METRIC:-loss}"
+METRIC="${METRIC:-fpr95}"
 SELECTION_MODE="${SELECTION_MODE:-best}"
 
-LAMBDA_EBO_IN_GRID="${LAMBDA_EBO_IN_GRID:-0.1}"
-LAMBDA_EBO_CORR_GRID="${LAMBDA_EBO_CORR_GRID:-0.1}"
-MARGIN_CORRECT_GRID="${MARGIN_CORRECT_GRID:--16 -13 -18}"
-MARGIN_MISS_GRID="${MARGIN_MISS_GRID:--5 -4 -3}"
+LAMBDA_EBO_IN_GRID="${LAMBDA_EBO_IN_GRID:-2 5}"
+LAMBDA_EBO_CORR_GRID="${LAMBDA_EBO_CORR_GRID:-0.6 2}"
+LAMBDA_EBO_CEN_IN_GRID="${LAMBDA_EBO_CEN_IN_GRID:-2 0.5}"
+LAMBDA_EBO_OUT_IN_GRID="${LAMBDA_EBO_OUT_IN_GRID:-5 7}"
+LAMBDA_EBO_CEN_CORR_GRID="${LAMBDA_EBO_CEN_CORR_GRID:-0.1}"
+LAMBDA_EBO_OUT_CORR_GRID="${LAMBDA_EBO_OUT_CORR_GRID:-2 0.5}"
+BOUNDARY_K_GRID="${BOUNDARY_K_GRID:-3}"
+MARGIN_CORRECT_GRID="${MARGIN_CORRECT_GRID:--5}"
+MARGIN_MISS_GRID="${MARGIN_MISS_GRID:--5}"
+BARRIER_T_GRID="${BARRIER_T_GRID:-1.0}"
+BARRIER_T_GROWTH_GRID="${BARRIER_T_GROWTH_GRID:-${BARRIER_T_GROWTH:-1.005 1.01}}"
 
 read -r -a lambda_ebo_in_values <<< "$LAMBDA_EBO_IN_GRID"
 read -r -a lambda_ebo_corr_values <<< "$LAMBDA_EBO_CORR_GRID"
+read -r -a lambda_ebo_cen_in_values <<< "$LAMBDA_EBO_CEN_IN_GRID"
+read -r -a lambda_ebo_out_in_values <<< "$LAMBDA_EBO_OUT_IN_GRID"
+read -r -a lambda_ebo_cen_corr_values <<< "$LAMBDA_EBO_CEN_CORR_GRID"
+read -r -a lambda_ebo_out_corr_values <<< "$LAMBDA_EBO_OUT_CORR_GRID"
+read -r -a boundary_k_values <<< "$BOUNDARY_K_GRID"
 read -r -a margin_correct_values <<< "$MARGIN_CORRECT_GRID"
 read -r -a margin_miss_values <<< "$MARGIN_MISS_GRID"
-
+read -r -a barrier_t_values <<< "$BARRIER_T_GRID"
+read -r -a barrier_t_growth_values <<< "$BARRIER_T_GROWTH_GRID"
 cd "$ROOT_DIR"
 
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
@@ -84,6 +97,7 @@ echo "Dataset        : ${DATASET_LOWER}"
 echo "Dataset root   : ${DATA_DIR}"
 echo "Output dir     : ${OUTPUT_DIR}"
 echo "Python script  : ${PYTHON_SCRIPT}"
+echo "Loss           : ${LOSS}"
 
 echo "Starting grid search..."
 
@@ -106,7 +120,14 @@ echo "Starting grid search..."
   --python-bin "$PYTHON_BIN" \
   --lambda-ebo-in-grid "${lambda_ebo_in_values[@]}" \
   --lambda-ebo-corr-grid "${lambda_ebo_corr_values[@]}" \
+  --lambda-ebo-cen-in-grid "${lambda_ebo_cen_in_values[@]}" \
+  --lambda-ebo-out-in-grid "${lambda_ebo_out_in_values[@]}" \
+  --lambda-ebo-cen-corr-grid "${lambda_ebo_cen_corr_values[@]}" \
+  --lambda-ebo-out-corr-grid "${lambda_ebo_out_corr_values[@]}" \
+  --boundary-k-grid "${boundary_k_values[@]}" \
   --margin-correct-grid "${margin_correct_values[@]}" \
-  --margin-miss-grid "${margin_miss_values[@]}"
+  --margin-miss-grid "${margin_miss_values[@]}" \
+  --barrier-t-grid "${barrier_t_values[@]}" \
+  --barrier-t-growth-grid "${barrier_t_growth_values[@]}"
 
 echo "Grid search finished!"

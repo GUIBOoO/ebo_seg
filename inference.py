@@ -13,7 +13,12 @@ import tqdm
 from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 
 from datasets import get_dataloaders, infer_dataset_type
-from metrics import compute_binary_metrics, compute_multiclass_metrics
+from metrics import (
+    compute_binary_metrics,
+    compute_binary_metrics_from_preds,
+    compute_multiclass_metrics,
+    compute_multiclass_metrics_from_preds,
+)
 from models import build_model_acdc, build_model_brats
 from utils import SIRC, doctor, energy, hybrid_energy
 
@@ -59,7 +64,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--num-samples", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max-pixels-kde", type=int, default=200000)
-    parser.add_argument("--energy-threshold", type=int, default= -25)
+    parser.add_argument("--energy-threshold", type=float, default=-25.0)
+    parser.add_argument("--msp-threshold", type=float, default=0.9)
     return parser
 
 
@@ -107,18 +113,29 @@ def _compute_score_maps(
         "beta": beta,
         "energy": energy_map,
         "hybrid_energy": hybrid_energy_map,
-        "sirc": -sirc,
+         "sirc": -sirc,
     }
 
 def _compute_detection_metrics(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float | None]:
     if labels.size == 0 or np.unique(labels).size < 2:
         return {"auroc": None, "aupr": None, "fpr95": None}
+    print("labels shape:", labels.shape)
+    print("scores shape:", scores.shape)
 
+    print("NaN in scores:", np.isnan(scores).sum())
+    print("Inf in scores:", np.isinf(scores).sum())
+
+    print("scores min:", np.nanmin(scores))
+    print("scores max:", np.nanmax(scores))
     auroc = float(roc_auc_score(labels, scores))
     aupr = float(average_precision_score(labels, scores))
     fpr, tpr, _ = roc_curve(labels, scores)
     valid = np.where(tpr >= 0.95)[0]
-    fpr95 = float(fpr[valid[0]]) if valid.size > 0 else 1.0
+    if valid.size > 0:
+        print("valid.size >0")
+        fpr95 = float(fpr[valid[0]]) 
+    else:
+        fpr95= 1.0
     return {"auroc": auroc, "aupr": aupr, "fpr95": fpr95}
 
 
@@ -149,6 +166,8 @@ def evaluate(
     device: torch.device,
     num_classes: int,
     temperature: float,
+    energy_threshold: float,
+    msp_threshold: float,
 ) -> Tuple[dict, Dict[str, np.ndarray], List[dict]]:
     total_dice = 0.0
     total_iou = 0.0
@@ -158,6 +177,12 @@ def evaluate(
     error_labels: List[np.ndarray] = []
     score_values = {name: [] for name in SCORE_NAMES}
     per_sample: List[dict] = []
+    energy_filtered_preds: List[torch.Tensor] = []
+    energy_filtered_targets: List[torch.Tensor] = []
+    msp_filtered_preds: List[torch.Tensor] = []
+    msp_filtered_targets: List[torch.Tensor] = []
+    num_energy_selected_pixels = 0
+    num_msp_selected_pixels = 0
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm.tqdm(loader, desc="Inference")):
@@ -180,6 +205,21 @@ def evaluate(
                     print("NaN:", np.isnan(arr).sum(), "Inf:", np.isinf(arr).sum())
                     print("Min:", np.nanmin(arr), "Max:", np.nanmax(arr))
             error_map = (preds != masks).long()
+            energy_mask = scores["energy"] < energy_threshold
+            energy_selected = int(energy_mask.sum().item())
+            num_energy_selected_pixels += energy_selected
+
+            if energy_selected > 0:
+                energy_filtered_preds.append(preds[energy_mask].detach().cpu())
+                energy_filtered_targets.append(masks[energy_mask].detach().cpu())
+
+            msp_mask = (-scores["msp"]) > msp_threshold
+            msp_selected = int(msp_mask.sum().item())
+            num_msp_selected_pixels += msp_selected
+
+            if msp_selected > 0:
+                msp_filtered_preds.append(preds[msp_mask].detach().cpu())
+                msp_filtered_targets.append(masks[msp_mask].detach().cpu())
 
             total_dice += dice
             total_iou += iou
@@ -209,6 +249,57 @@ def evaluate(
         "iou": total_iou / max(num_batches, 1),
         "pixel_acc": total_acc / max(num_batches, 1),
     }
+
+    if num_energy_selected_pixels > 0:
+        selected_preds = torch.cat(energy_filtered_preds)
+        selected_targets = torch.cat(energy_filtered_targets)
+        if num_classes == 1:
+            energy_filtered_dice, energy_filtered_iou, energy_filtered_acc = compute_binary_metrics_from_preds(
+                selected_preds,
+                selected_targets,
+            )
+        else:
+            energy_filtered_dice, energy_filtered_iou, energy_filtered_acc = compute_multiclass_metrics_from_preds(
+                selected_preds,
+                selected_targets,
+                num_classes,
+            )
+    else:
+        energy_filtered_dice, energy_filtered_iou, energy_filtered_acc = float("nan"), float("nan"), float("nan")
+
+    segmentation_metrics["energy_below_threshold"] = {
+        "threshold": energy_threshold,
+        "num_pixels": num_energy_selected_pixels,
+        "dice": energy_filtered_dice,
+        "iou": energy_filtered_iou,
+        "pixel_acc": energy_filtered_acc,
+    }
+
+    if num_msp_selected_pixels > 0:
+        selected_preds = torch.cat(msp_filtered_preds)
+        selected_targets = torch.cat(msp_filtered_targets)
+        if num_classes == 1:
+            msp_filtered_dice, msp_filtered_iou, msp_filtered_acc = compute_binary_metrics_from_preds(
+                selected_preds,
+                selected_targets,
+            )
+        else:
+            msp_filtered_dice, msp_filtered_iou, msp_filtered_acc = compute_multiclass_metrics_from_preds(
+                selected_preds,
+                selected_targets,
+                num_classes,
+            )
+    else:
+        msp_filtered_dice, msp_filtered_iou, msp_filtered_acc = float("nan"), float("nan"), float("nan")
+
+    segmentation_metrics["msp_above_threshold"] = {
+        "threshold": msp_threshold,
+        "num_pixels": num_msp_selected_pixels,
+        "dice": msp_filtered_dice,
+        "iou": msp_filtered_iou,
+        "pixel_acc": msp_filtered_acc,
+    }
+
     flattened_labels = np.concatenate(error_labels) if error_labels else np.array([], dtype=np.int64)
     flattened_scores = {
         name: np.concatenate(chunks) if chunks else np.array([], dtype=np.float32)
@@ -278,7 +369,13 @@ def save_distributions(score_arrays: Dict[str, np.ndarray], output_dir: Path, ma
 
 
 
-def save_visualizations(per_sample: Iterable[dict], output_dir: Path, num_samples: int, energy_threshold: float=0.0) -> None:
+def save_visualizations(
+    per_sample: Iterable[dict],
+    output_dir: Path,
+    num_samples: int,
+    energy_threshold: float = 0.0,
+    msp_threshold: float = 0.9,
+) -> None:
     vis_dir = output_dir / "visualizations"
     vis_dir.mkdir(parents=True, exist_ok=True)
 
@@ -310,11 +407,14 @@ def save_visualizations(per_sample: Iterable[dict], output_dir: Path, num_sample
 
         energy = sample["scores"]["energy"].numpy()
         high_energy = (energy > energy_threshold).astype(np.uint8)
+        msp = -sample["scores"]["msp"].numpy()
+        high_msp = (msp > msp_threshold).astype(np.uint8)
 
         axes[10].imshow(high_energy, cmap="gray")
         axes[10].set_title(f"Energy > {energy_threshold}")
 
-        axes[11].axis("off")
+        axes[11].imshow(high_msp, cmap="gray")
+        axes[11].set_title(f"MSP > {msp_threshold}")
 
         plt.tight_layout()
         save_path = vis_dir / f"sample_{sample['sample_id']:04d}.png"
@@ -364,6 +464,8 @@ def main() -> None:
         device=device,
         num_classes=num_classes,
         temperature=args.temperature,
+        energy_threshold=args.energy_threshold,
+        msp_threshold=args.msp_threshold,
     )
 
     run_metadata = {
@@ -374,6 +476,8 @@ def main() -> None:
         "batch_size": args.batch_size,
         "num_classes": num_classes,
         "modes": sorted(modes),
+        "energy_threshold": args.energy_threshold,
+        "msp_threshold": args.msp_threshold,
     }
     with (output_dir / "run_config.json").open("w", encoding="utf-8") as file_obj:
         json.dump(run_metadata, file_obj, indent=2)
@@ -383,7 +487,13 @@ def main() -> None:
     if "distrib" in modes:
         save_distributions(score_arrays, output_dir, args.max_pixels_kde)
     if "visu" in modes:
-        save_visualizations(per_sample, output_dir, args.num_samples, args.energy_threshold)
+        save_visualizations(
+            per_sample,
+            output_dir,
+            args.num_samples,
+            args.energy_threshold,
+            args.msp_threshold,
+        )
 
     print(f"Artifacts saved in {output_dir}")
 

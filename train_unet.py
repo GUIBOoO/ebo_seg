@@ -12,7 +12,13 @@ import tqdm
 from torch.utils.data import DataLoader
 
 from datasets import get_dataloaders, infer_dataset_type
-from losses import HybridEBOLoss, build_loss
+from losses import (
+    BoundEBOLogBarrierLoss,
+    EBOLossLogBarrier,
+    HybridEBOLoss,
+    build_loss,
+    normalize_loss_name,
+)
 from metrics import EpochStats, compute_binary_metrics, compute_multiclass_metrics
 from models import build_model_acdc, build_model_brats
 from utils import (
@@ -55,12 +61,17 @@ def _compute_tracked_losses(
     }
 
     if hasattr(criterion, 'margin_correct') and hasattr(criterion, 'margin_miss'):
-        corr_terms = F.relu(energy - criterion.margin_correct) ** 2
+        if hasattr(criterion, 'barrier'):
+            corr_terms = criterion.barrier(energy - criterion.margin_correct, criterion.t)
+            miss_terms = criterion.barrier(criterion.margin_miss - energy, criterion.t)
+        else:
+            corr_terms = F.relu(energy - criterion.margin_correct) ** 2
+            miss_terms = F.relu(criterion.margin_miss - energy) ** 2
+
         corr_terms = corr_terms[correct_mask]
         if corr_terms.numel() > 0:
             tracked_losses['loss_corr'] = corr_terms.mean()
 
-        miss_terms = F.relu(criterion.margin_miss - energy) ** 2
         miss_terms = miss_terms[incorrect_mask]
         if miss_terms.numel() > 0:
             tracked_losses['loss_miss'] = miss_terms.mean()
@@ -89,6 +100,7 @@ def run_epoch(
     energy_save_path: str | Path = None,
     epoch: int | None=None,
     track_loss_gradients: bool = False,
+    barrier_t_growth: float = 1.0,
 ) -> EpochStats:
     model.train(train)
     total_loss = 0.0
@@ -112,9 +124,15 @@ def run_epoch(
             logits = model(images)
             loss_targets = masks if num_classes == 1 else masks.squeeze(1).long()
             uses_hybrid_ebo = isinstance(criterion, HybridEBOLoss)
+            uses_logbar = isinstance(criterion, (EBOLossLogBarrier, BoundEBOLogBarrierLoss))
             if uses_hybrid_ebo:
                 loss = criterion(logits, loss_targets, images)
                 energy = hybrid_energy(logits, images)
+            elif uses_logbar:
+                if epoch is not None:
+                    criterion.t = criterion.initial_t * (barrier_t_growth ** max(epoch - 1, 0))
+                loss = criterion(logits, loss_targets)
+                energy = energy_fn(logits)
             else:
                 loss = criterion(logits, loss_targets)
                 energy = energy_fn(logits)
@@ -259,10 +277,17 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument('--num-classes', type=int, default=1)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--lambda-ebo-in', type=float, default=5)
+    parser.add_argument('--lambda-ebo-in', type=float, default=0.1)
     parser.add_argument('--lambda-ebo-corr', type=float, default=0.1)
-    parser.add_argument('--margin-correct', type=float, default=-17.0)
+    parser.add_argument('--lambda-ebo-cen-in', type=float, default=None)
+    parser.add_argument('--lambda-ebo-out-in', type=float, default=None)
+    parser.add_argument('--lambda-ebo-cen-corr', type=float, default=None)
+    parser.add_argument('--lambda-ebo-out-corr', type=float, default=None)
+    parser.add_argument('--boundary-k', type=int, default=1)
+    parser.add_argument('--margin-correct', type=float, default=-17)
     parser.add_argument('--margin-miss', type=float, default=-5.0)
+    parser.add_argument('--barrier-t', type=float, default=1.0)
+    parser.add_argument('--barrier-t-growth', type=float, default=1.1)
     parser.add_argument(
         '--track-loss-gradients',
         action='store_true',
@@ -273,6 +298,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_argparser().parse_args()
+    args.loss = normalize_loss_name(args.loss)
     set_seed(args.seed)
 
     energy_save_path_val = args.output_dir / "val_distribs"
@@ -298,8 +324,14 @@ def main() -> None:
         args.num_classes,
         lambda_ebo_in=args.lambda_ebo_in,
         lambda_ebo_corr=args.lambda_ebo_corr,
+        lambda_ebo_cen_in=args.lambda_ebo_cen_in,
+        lambda_ebo_out_in=args.lambda_ebo_out_in,
+        lambda_ebo_cen_corr=args.lambda_ebo_cen_corr,
+        lambda_ebo_out_corr=args.lambda_ebo_out_corr,
+        boundary_k=args.boundary_k,
         margin_correct=args.margin_correct,
         margin_miss=args.margin_miss,
+        barrier_t=args.barrier_t,
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -318,8 +350,15 @@ def main() -> None:
         'EBO params: '
         f'lambda_ebo_in={args.lambda_ebo_in}, '
         f'lambda_ebo_corr={args.lambda_ebo_corr}, '
+        f'lambda_ebo_cen_in={args.lambda_ebo_cen_in}, '
+        f'lambda_ebo_out_in={args.lambda_ebo_out_in}, '
+        f'lambda_ebo_cen_corr={args.lambda_ebo_cen_corr}, '
+        f'lambda_ebo_out_corr={args.lambda_ebo_out_corr}, '
+        f'boundary_k={args.boundary_k}, '
         f'margin_correct={args.margin_correct}, '
-        f'margin_miss={args.margin_miss}'
+        f'margin_miss={args.margin_miss}, '
+        f'barrier_t={args.barrier_t}, '
+        f'barrier_t_growth={args.barrier_t_growth}'
     )
 
     for epoch in range(1, args.epochs + 1):
@@ -335,6 +374,7 @@ def main() -> None:
             energy_save_path=energy_save_path_train,
             epoch=epoch,
             track_loss_gradients=args.track_loss_gradients,
+            barrier_t_growth=args.barrier_t_growth,
         )
         val_stats = run_epoch(
             model,
@@ -348,6 +388,7 @@ def main() -> None:
             energy_save_path=energy_save_path_val,
             epoch=epoch,
             track_loss_gradients=False,
+            barrier_t_growth=args.barrier_t_growth,
         )
 
         history.append(

@@ -197,6 +197,45 @@ def energy(logits, T=1):
     energy =  -T * torch.logsumexp(logits / T, dim=1)
     return energy
 
+
+def compute_boundary_mask(
+    labels: torch.Tensor,
+    k: int = 1,
+    num_classes: int | None = None,
+) -> torch.Tensor:
+    """
+    Boolean mask of pixels whose k-neighborhood contains at least one
+    different label.
+    """
+    if k < 0:
+        raise ValueError(f"k must be >= 0, got {k}")
+
+    if labels.ndim == 4:
+        if labels.shape[1] != 1:
+            raise ValueError(
+                f"Expected labels with shape (B, 1, H, W), got {tuple(labels.shape)}"
+            )
+        labels = labels.squeeze(1)
+    elif labels.ndim != 3:
+        raise ValueError(f"Expected labels with shape (B, H, W), got {tuple(labels.shape)}")
+
+    labels = labels.long()
+
+    if k == 0:
+        return torch.zeros_like(labels, dtype=torch.bool)
+
+    if num_classes is None:
+        num_classes = int(labels.max().item()) + 1
+
+    one_hot = F.one_hot(labels, num_classes=num_classes).permute(0, 3, 1, 2).float()
+    class_presence = F.max_pool2d(
+        one_hot,
+        kernel_size=2 * k + 1,
+        stride=1,
+        padding=k,
+    )
+    return class_presence.sum(dim=1) > 1
+
 # def doctor(softmax):
 #     d_beta = torch.max(softmax, dim=1).values/(1-torch.max(softmax,dim=1).values)
 #     d_alpha =torch.sum(softmax**2, dim=1)/(1-torch.sum(softmax**2, dim=1))

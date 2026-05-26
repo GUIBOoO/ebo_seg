@@ -14,8 +14,8 @@ class EpochStats:
     fpr95: Optional[float]=None
 
 
-def compute_binary_metrics(logits: torch.Tensor, targets: torch.Tensor) -> Tuple[float, float, float]:
-    preds = (torch.sigmoid(logits) > 0.5).float()
+def compute_binary_metrics_from_preds(preds: torch.Tensor, targets: torch.Tensor) -> Tuple[float, float, float]:
+    preds = preds.float()
     targets = targets.float()
 
     intersection = (preds * targets).sum().item()
@@ -31,15 +31,35 @@ def compute_binary_metrics(logits: torch.Tensor, targets: torch.Tensor) -> Tuple
     return dice, iou, pixel_acc
 
 
-def compute_multiclass_metrics(logits: torch.Tensor, targets: torch.Tensor, num_classes: int) -> Tuple[float, float, float]:
+def compute_binary_metrics(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    valid_mask: Optional[torch.Tensor] = None,
+) -> Tuple[float, float, float]:
+    preds = (torch.sigmoid(logits) > 0.5).float()
+    targets = targets.float()
 
-    if targets.ndim == 4 and targets.shape[1] == 1:
-        targets = targets.squeeze(1)
+    if valid_mask is not None:
+        if valid_mask.ndim == preds.ndim - 1:
+            valid_mask = valid_mask.unsqueeze(1)
+        valid_mask = valid_mask.bool()
+        preds = preds[valid_mask]
+        targets = targets[valid_mask]
 
-    preds = torch.argmax(logits, dim=1)
+    if preds.numel() == 0:
+        return float("nan"), float("nan"), float("nan")
 
+    return compute_binary_metrics_from_preds(preds, targets)
+
+
+def compute_multiclass_metrics_from_preds(
+    preds: torch.Tensor,
+    targets: torch.Tensor,
+    num_classes: int,
+) -> Tuple[float, float, float]:
     if preds.shape != targets.shape:
         raise ValueError(f"Shape mismatch: preds={preds.shape}, targets={targets.shape}")
+
     total = targets.numel()
     correct = (preds == targets).sum().item()
     pixel_acc = correct / total
@@ -57,3 +77,28 @@ def compute_multiclass_metrics(logits: torch.Tensor, targets: torch.Tensor, num_
         ious.append((intersection + 1e-6) / (union + 1e-6))
 
     return float(np.mean(dices)), float(np.mean(ious)), pixel_acc
+
+
+def compute_multiclass_metrics(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    num_classes: int,
+    valid_mask: Optional[torch.Tensor] = None,
+) -> Tuple[float, float, float]:
+
+    if targets.ndim == 4 and targets.shape[1] == 1:
+        targets = targets.squeeze(1)
+
+    preds = torch.argmax(logits, dim=1)
+
+    if valid_mask is not None:
+        if valid_mask.ndim == 4 and valid_mask.shape[1] == 1:
+            valid_mask = valid_mask.squeeze(1)
+        valid_mask = valid_mask.bool()
+        preds = preds[valid_mask]
+        targets = targets[valid_mask]
+
+    if preds.numel() == 0:
+        return float("nan"), float("nan"), float("nan")
+
+    return compute_multiclass_metrics_from_preds(preds, targets, num_classes)
