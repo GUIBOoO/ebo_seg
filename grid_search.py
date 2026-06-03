@@ -38,6 +38,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument('--margin-correct-grid', type=float, nargs='+', default=[-35.0])
     parser.add_argument('--margin-miss-grid', type=float, nargs='+', default=[-5.0])
     parser.add_argument('--barrier-t-grid', type=float, nargs='+', default=[1.0])
+    parser.add_argument('--rho-grid', type=float, nargs='+', default=[1.0])
     parser.add_argument(
         '--barrier-t-growth-grid',
         '--barrier-t-growth',
@@ -68,6 +69,14 @@ def is_log_ebo_loss(loss_name: str) -> bool:
 
 def is_bound_log_ebo_loss(loss_name: str) -> bool:
     return loss_name in {'bound_log_ebo', 'bound_ebo_log_barrier', 'boundary_log_ebo'}
+
+
+def is_bound_aug_lag_ebo_loss(loss_name: str) -> bool:
+    return loss_name in {'bound_ebo_aug_lag', 'bound_aug_lag_ebo', 'boundary_aug_lag_ebo'}
+
+
+def is_bound_aug_log_ebo_loss(loss_name: str) -> bool:
+    return loss_name in {'bound_ebo_aug_log', 'bound_aug_log_ebo', 'boundary_aug_log_ebo'}
 
 
 def build_search_space(args: argparse.Namespace) -> Dict[str, List[float]]:
@@ -113,6 +122,32 @@ def build_search_space(args: argparse.Namespace) -> Dict[str, List[float]]:
             'barrier_t_growth': args.barrier_t_growth_grid,
         }
 
+    if is_bound_aug_lag_ebo_loss(args.loss):
+        return {
+            'lambda_ebo_cen_in': args.lambda_ebo_cen_in_grid,
+            'lambda_ebo_out_in': args.lambda_ebo_out_in_grid,
+            'lambda_ebo_cen_corr': args.lambda_ebo_cen_corr_grid,
+            'lambda_ebo_out_corr': args.lambda_ebo_out_corr_grid,
+            'boundary_k': args.boundary_k_grid,
+            'margin_correct': args.margin_correct_grid,
+            'margin_miss': args.margin_miss_grid,
+            'rho': args.rho_grid,
+        }
+
+    if is_bound_aug_log_ebo_loss(args.loss):
+        return {
+            'lambda_ebo_cen_in': args.lambda_ebo_cen_in_grid,
+            'lambda_ebo_out_in': args.lambda_ebo_out_in_grid,
+            'lambda_ebo_cen_corr': args.lambda_ebo_cen_corr_grid,
+            'lambda_ebo_out_corr': args.lambda_ebo_out_corr_grid,
+            'boundary_k': args.boundary_k_grid,
+            'margin_correct': args.margin_correct_grid,
+            'margin_miss': args.margin_miss_grid,
+            'barrier_t': args.barrier_t_grid,
+            'barrier_t_growth': args.barrier_t_growth_grid,
+            'rho': args.rho_grid,
+        }
+
     raise ValueError(f'Cette grid search ne prend pas en charge la loss {args.loss}.')
 
 
@@ -144,6 +179,8 @@ def main() -> None:
         and not is_bound_ebo_loss(args.loss)
         and not is_log_ebo_loss(args.loss)
         and not is_bound_log_ebo_loss(args.loss)
+        and not is_bound_aug_lag_ebo_loss(args.loss)
+        and not is_bound_aug_log_ebo_loss(args.loss)
     ):
         raise ValueError('Cette grid search est prevue pour une loss EBO.')
 
@@ -241,8 +278,47 @@ def main() -> None:
                 '--lambda-ebo-out-corr', str(lambda_ebo_out_corr),
                 '--boundary-k', str(boundary_k),
                 '--barrier-t', str(barrier_t),
-                '--barrier-t-growth', str(barrier_t_growth)
+                '--barrier-t-growth', str(barrier_t_growth),
             ])
+        elif is_bound_aug_lag_ebo_loss(args.loss) or is_bound_aug_log_ebo_loss(args.loss):
+            lambda_ebo_cen_in = trial.suggest_categorical('lambda_ebo_cen_in', search_space['lambda_ebo_cen_in'])
+            lambda_ebo_out_in = trial.suggest_categorical('lambda_ebo_out_in', search_space['lambda_ebo_out_in'])
+            lambda_ebo_cen_corr = trial.suggest_categorical('lambda_ebo_cen_corr', search_space['lambda_ebo_cen_corr'])
+            lambda_ebo_out_corr = trial.suggest_categorical('lambda_ebo_out_corr', search_space['lambda_ebo_out_corr'])
+            boundary_k = trial.suggest_categorical('boundary_k', search_space['boundary_k'])
+            rho = trial.suggest_categorical('rho', search_space['rho'])
+            barrier_t = trial.suggest_categorical('barrier_t', search_space['barrier_t']) if is_bound_aug_log_ebo_loss(args.loss) else None
+            barrier_t_growth = trial.suggest_categorical('barrier_t_growth', search_space['barrier_t_growth']) if is_bound_aug_log_ebo_loss(args.loss) else None
+            log_suffix = (
+                f't_{sanitize_float(barrier_t)}_'
+                f'tg_{sanitize_float(barrier_t_growth)}_'
+                if is_bound_aug_log_ebo_loss(args.loss) else ''
+            )
+            trial_name = (
+                f'trial_{trial.number:03d}_'
+                f'cenin_{sanitize_float(lambda_ebo_cen_in)}_'
+                f'outin_{sanitize_float(lambda_ebo_out_in)}_'
+                f'cencorr_{sanitize_float(lambda_ebo_cen_corr)}_'
+                f'outcorr_{sanitize_float(lambda_ebo_out_corr)}_'
+                f'bk_{boundary_k}_'
+                f'rho_{sanitize_float(rho)}_'
+                f'{log_suffix}'
+                f'mcorr_{sanitize_float(margin_correct)}_'
+                f'mmiss_{sanitize_float(margin_miss)}'
+            )
+            command.extend([
+                '--lambda-ebo-cen-in', str(lambda_ebo_cen_in),
+                '--lambda-ebo-out-in', str(lambda_ebo_out_in),
+                '--lambda-ebo-cen-corr', str(lambda_ebo_cen_corr),
+                '--lambda-ebo-out-corr', str(lambda_ebo_out_corr),
+                '--boundary-k', str(boundary_k),
+                '--rho', str(rho),
+            ])
+            if is_bound_aug_log_ebo_loss(args.loss):
+                command.extend([
+                    '--barrier-t', str(barrier_t),
+                    '--barrier-t-growth', str(barrier_t_growth),
+                ])
         else:
             lambda_ebo_cen_in = trial.suggest_categorical('lambda_ebo_cen_in', search_space['lambda_ebo_cen_in'])
             lambda_ebo_out_in = trial.suggest_categorical('lambda_ebo_out_in', search_space['lambda_ebo_out_in'])

@@ -13,6 +13,8 @@ from torch.utils.data import DataLoader
 
 from datasets import get_dataloaders, infer_dataset_type
 from losses import (
+    BoundEBOAugLagLoss,
+    BoundEBOAugLogLoss,
     BoundEBOLogBarrierLoss,
     EBOLossLogBarrier,
     HybridEBOLoss,
@@ -22,6 +24,7 @@ from losses import (
 from metrics import EpochStats, compute_binary_metrics, compute_multiclass_metrics
 from models import build_model_acdc, build_model_brats
 from utils import (
+    compute_boundary_mask,
     save_checkpoint,
     save_gradients,
     set_seed,
@@ -61,7 +64,34 @@ def _compute_tracked_losses(
     }
 
     if hasattr(criterion, 'margin_correct') and hasattr(criterion, 'margin_miss'):
-        if hasattr(criterion, 'barrier'):
+        if isinstance(criterion, (BoundEBOAugLagLoss, BoundEBOAugLogLoss)):
+            boundary_mask = compute_boundary_mask(
+                loss_targets,
+                k=criterion.boundary_k,
+                num_classes=logits.shape[1],
+            )
+            g_corr = energy - criterion.margin_correct
+            g_miss = criterion.margin_miss - energy
+            if isinstance(criterion, BoundEBOAugLogLoss):
+                g_corr = criterion.barrier(g_corr, criterion.t)
+                g_miss = criterion.barrier(g_miss, criterion.t)
+            lambda_corr = torch.where(
+                boundary_mask,
+                criterion.lambda_corr_boundary.expand_as(energy),
+                criterion.lambda_corr_center.expand_as(energy),
+            )
+            lambda_miss = torch.where(
+                boundary_mask,
+                criterion.lambda_miss_boundary.expand_as(energy),
+                criterion.lambda_miss_center.expand_as(energy),
+            )
+            corr_terms = 0.5 / criterion.rho * (
+                torch.relu(lambda_corr + criterion.rho * g_corr) ** 2 - lambda_corr ** 2
+            )
+            miss_terms = 0.5 / criterion.rho * (
+                torch.relu(lambda_miss + criterion.rho * g_miss) ** 2 - lambda_miss ** 2
+            )
+        elif hasattr(criterion, 'barrier'):
             corr_terms = criterion.barrier(energy - criterion.margin_correct, criterion.t)
             miss_terms = criterion.barrier(criterion.margin_miss - energy, criterion.t)
         else:
@@ -124,10 +154,16 @@ def run_epoch(
             logits = model(images)
             loss_targets = masks if num_classes == 1 else masks.squeeze(1).long()
             uses_hybrid_ebo = isinstance(criterion, HybridEBOLoss)
-            uses_logbar = isinstance(criterion, (EBOLossLogBarrier, BoundEBOLogBarrierLoss))
+            uses_logbar = isinstance(criterion, (EBOLossLogBarrier, BoundEBOLogBarrierLoss, BoundEBOAugLogLoss))
+            uses_aug_lag = isinstance(criterion, (BoundEBOAugLagLoss, BoundEBOAugLogLoss))
             if uses_hybrid_ebo:
                 loss = criterion(logits, loss_targets, images)
                 energy = hybrid_energy(logits, images)
+            elif uses_aug_lag:
+                if uses_logbar and epoch is not None:
+                    criterion.t = criterion.initial_t * (barrier_t_growth ** max(epoch - 1, 0))
+                loss = criterion(logits, loss_targets)
+                energy = energy_fn(logits)
             elif uses_logbar:
                 if epoch is not None:
                     criterion.t = criterion.initial_t * (barrier_t_growth ** max(epoch - 1, 0))
@@ -193,6 +229,8 @@ def run_epoch(
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
+                if uses_aug_lag:
+                    criterion.update_lambdas(logits.detach(), loss_targets)
 
             if num_classes == 1:
                 dice, iou, pixel_acc = compute_binary_metrics(logits, masks)
@@ -288,6 +326,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument('--margin-miss', type=float, default=-5.0)
     parser.add_argument('--barrier-t', type=float, default=1.0)
     parser.add_argument('--barrier-t-growth', type=float, default=1.1)
+    parser.add_argument('--rho', type=float, default=1.0)
     parser.add_argument(
         '--track-loss-gradients',
         action='store_true',
@@ -332,7 +371,8 @@ def main() -> None:
         margin_correct=args.margin_correct,
         margin_miss=args.margin_miss,
         barrier_t=args.barrier_t,
-    )
+        rho=args.rho,
+    ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     with (args.output_dir / f'config_{args.loss}.json').open('w', encoding='utf-8') as file_obj:
@@ -358,7 +398,8 @@ def main() -> None:
         f'margin_correct={args.margin_correct}, '
         f'margin_miss={args.margin_miss}, '
         f'barrier_t={args.barrier_t}, '
-        f'barrier_t_growth={args.barrier_t_growth}'
+        f'barrier_t_growth={args.barrier_t_growth}, '
+        f'rho={args.rho}'
     )
 
     for epoch in range(1, args.epochs + 1):
@@ -420,4 +461,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     print('launching training')
+    print(torch.cuda.is_available())
+    print(torch.cuda.device_count())
+    print(torch.cuda.get_device_name(0))
     main()

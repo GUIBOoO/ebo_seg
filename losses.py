@@ -325,17 +325,13 @@ class BoundEBOLogBarrierLoss(nn.Module):
 
 class BoundEBOAugLagLoss(nn.Module):
     """
-    Augmented Lagrangian version.
+    Version pure Augmented Lagrangian, sans Log-Barrier.
 
     Contraintes :
-        correct sample  -> energy <= margin_correct
-        wrong sample    -> energy >= margin_miss
+        correct sample  -> energy <= margin_correct   (g_corr = energy - margin_correct <= 0)
+        wrong sample    -> energy >= margin_miss      (g_miss = margin_miss - energy   <= 0)
 
-    soit :
-        g_corr = energy - margin_correct <= 0
-        g_miss = margin_miss - energy <= 0
-
-    Les multiplicateurs de Lagrange (lambda) sont appris automatiquement.
+    Les multiplicateurs de Lagrange sont mis a jour explicitement apres chaque batch.
     """
 
     def __init__(
@@ -371,19 +367,20 @@ class BoundEBOAugLagLoss(nn.Module):
         self.rho = rho
 
         self.lambda_corr_center_raw = nn.Parameter(
-            torch.tensor(lambda_init_corr_center).log()
+            self._inverse_softplus(torch.tensor(lambda_init_corr_center)),
+            requires_grad=False,
         )
-
         self.lambda_corr_boundary_raw = nn.Parameter(
-            torch.tensor(lambda_init_corr_boundary).log()
+            self._inverse_softplus(torch.tensor(lambda_init_corr_boundary)),
+            requires_grad=False,
         )
-
         self.lambda_miss_center_raw = nn.Parameter(
-            torch.tensor(lambda_init_miss_center).log()
+            self._inverse_softplus(torch.tensor(lambda_init_miss_center)),
+            requires_grad=False,
         )
-
         self.lambda_miss_boundary_raw = nn.Parameter(
-            torch.tensor(lambda_init_miss_boundary).log()
+            self._inverse_softplus(torch.tensor(lambda_init_miss_boundary)),
+            requires_grad=False,
         )
 
     @property
@@ -401,6 +398,11 @@ class BoundEBOAugLagLoss(nn.Module):
     @property
     def lambda_miss_boundary(self):
         return F.softplus(self.lambda_miss_boundary_raw)
+
+    @staticmethod
+    def _inverse_softplus(value: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        value = torch.clamp(value, min=eps)
+        return value + torch.log(-torch.expm1(-value))
 
     def forward(self, logits, targets, image=None):
 
@@ -432,34 +434,23 @@ class BoundEBOAugLagLoss(nn.Module):
             self.lambda_miss_center.expand_as(energy),
         )
 
-        aug_corr = (
-            lambda_corr * g_corr
-            + 0.5 * self.rho * torch.relu(g_corr) ** 2
+        aug_corr = 0.5 / self.rho * (
+            torch.relu(lambda_corr + self.rho * g_corr) ** 2 - lambda_corr ** 2
         )
 
-        aug_miss = (
-            lambda_miss * g_miss
-            + 0.5 * self.rho * torch.relu(g_miss) ** 2
+        aug_miss = 0.5 / self.rho * (
+            torch.relu(lambda_miss + self.rho * g_miss) ** 2 - lambda_miss ** 2
         )
 
-        ebo = torch.where(
-            correct_mask,
-            aug_corr,
-            aug_miss,
-        )
+        alm_term = torch.where(correct_mask, aug_corr, aug_miss)
 
-        total = base + ebo.mean()
-
-        return total
+        return base + alm_term.mean()
 
     @torch.no_grad()
     def update_lambdas(self, logits, targets):
         """
-        Mise à jour duale classique :
-
-            λ <- max(0, λ + rho * g(x))
-
-        à appeler après chaque batch ou epoch.
+        Mise a jour duale classique :
+            lambda <- max(0, lambda + rho * g(x))
         """
 
         energy = energy_fn(logits, self.temperature)
@@ -513,22 +504,395 @@ class BoundEBOAugLagLoss(nn.Module):
             min=0.0,
         )
 
-        self.lambda_corr_boundary_raw.copy_(
-            torch.log(torch.exp(new_corr_boundary) - 1.0)
+        self.lambda_corr_boundary_raw.copy_(self._inverse_softplus(new_corr_boundary))
+
+        self.lambda_corr_center_raw.copy_(self._inverse_softplus(new_corr_center))
+
+        self.lambda_miss_boundary_raw.copy_(self._inverse_softplus(new_miss_boundary))
+
+        self.lambda_miss_center_raw.copy_(self._inverse_softplus(new_miss_center))
+
+class BoundEBOAugLogLoss(nn.Module):
+    """
+    Version Augmented Lagrangian avec Log-Barrier.
+
+    Contraintes :
+        correct sample  -> energy <= margin_correct   (g_corr = energy - margin_correct <= 0)
+        wrong sample    -> energy >= margin_miss      (g_miss = margin_miss - energy   <= 0)
+
+    Les contraintes sont transformees par la Log-Barrier, puis les multiplicateurs
+    de Lagrange sont mis a jour explicitement apres chaque batch.
+    """
+
+    def __init__(
+        self,
+        base_loss: nn.Module,
+
+        boundary_k: int = 1,
+
+        margin_correct: float = -25.0,
+        margin_miss: float = -5.0,
+
+        temperature: float = 1.0,
+
+        rho: float = 1.0,
+
+        lambda_init_corr_center: float = 0.01,
+        lambda_init_corr_boundary: float = 0.01,
+
+        lambda_init_miss_center: float = 0.01,
+        lambda_init_miss_boundary: float = 0.01,
+
+        t: float = 1.0,
+    ):
+        super().__init__()
+
+        self.base_loss = base_loss
+
+        self.boundary_k = boundary_k
+
+        self.margin_correct = margin_correct
+        self.margin_miss = margin_miss
+
+        self.temperature = temperature
+
+        self.rho = rho
+
+        self.lambda_corr_center_raw = nn.Parameter(
+            self._inverse_softplus(torch.tensor(lambda_init_corr_center)),
+            requires_grad=False,
+        )
+        self.lambda_corr_boundary_raw = nn.Parameter(
+            self._inverse_softplus(torch.tensor(lambda_init_corr_boundary)),
+            requires_grad=False,
+        )
+        self.lambda_miss_center_raw = nn.Parameter(
+            self._inverse_softplus(torch.tensor(lambda_init_miss_center)),
+            requires_grad=False,
+        )
+        self.lambda_miss_boundary_raw = nn.Parameter(
+            self._inverse_softplus(torch.tensor(lambda_init_miss_boundary)),
+            requires_grad=False,
+        )
+        self.t = t
+        self.initial_t = t
+
+        self.barrier = LogBarrierExtended()
+
+    @property
+    def lambda_corr_center(self):
+        return F.softplus(self.lambda_corr_center_raw)
+
+    @property
+    def lambda_corr_boundary(self):
+        return F.softplus(self.lambda_corr_boundary_raw)
+
+    @property
+    def lambda_miss_center(self):
+        return F.softplus(self.lambda_miss_center_raw)
+
+    @property
+    def lambda_miss_boundary(self):
+        return F.softplus(self.lambda_miss_boundary_raw)
+
+    @staticmethod
+    def _inverse_softplus(value: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        value = torch.clamp(value, min=eps)
+        return value + torch.log(-torch.expm1(-value))
+
+    def forward(self, logits, targets, image=None):
+
+        base = self.base_loss(logits, targets)
+
+        energy = energy_fn(logits, self.temperature)
+
+        pred = torch.argmax(logits, dim=1)
+        correct_mask = pred == targets
+
+        boundary_mask = compute_boundary_mask(
+            targets,
+            k=self.boundary_k,
+            num_classes=logits.shape[1],
         )
 
-        self.lambda_corr_center_raw.copy_(
-            torch.log(torch.exp(new_corr_center) - 1.0)
+        g_miss = self.barrier(self.margin_miss - energy, self.t)
+
+        g_corr = self.barrier(energy - self.margin_correct, self.t)
+
+        lambda_corr = torch.where(
+            boundary_mask,
+            self.lambda_corr_boundary.expand_as(energy),
+            self.lambda_corr_center.expand_as(energy),
         )
 
-        self.lambda_miss_boundary_raw.copy_(
-            torch.log(torch.exp(new_miss_boundary) - 1.0)
+        lambda_miss = torch.where(
+            boundary_mask,
+            self.lambda_miss_boundary.expand_as(energy),
+            self.lambda_miss_center.expand_as(energy),
         )
 
-        self.lambda_miss_center_raw.copy_(
-            torch.log(torch.exp(new_miss_center) - 1.0)
+        aug_corr = 0.5 / self.rho * (
+            torch.relu(lambda_corr + self.rho * g_corr) ** 2 - lambda_corr ** 2
         )
 
+        aug_miss = 0.5 / self.rho * (
+            torch.relu(lambda_miss + self.rho * g_miss) ** 2 - lambda_miss ** 2
+        )
+
+        alm_term = torch.where(correct_mask, aug_corr, aug_miss)
+
+        return base + alm_term.mean()
+
+    @torch.no_grad()
+    def update_lambdas(self, logits, targets):
+        """
+        Mise a jour duale classique :
+            lambda <- max(0, lambda + rho * g(x))
+        """
+
+        energy = energy_fn(logits, self.temperature)
+
+        pred = torch.argmax(logits, dim=1)
+        correct_mask = pred == targets
+
+        boundary_mask = compute_boundary_mask(
+            targets,
+            k=self.boundary_k,
+            num_classes=logits.shape[1],
+        )
+
+        g_miss = self.margin_miss - energy
+
+        g_corr = energy - self.margin_correct
+
+        def masked_mean(x, mask):
+            if mask.sum() == 0:
+                return torch.tensor(0.0, device=x.device)
+            return x[mask].mean()
+
+        corr_boundary = correct_mask & boundary_mask
+        corr_center = correct_mask & (~boundary_mask)
+
+        miss_boundary = (~correct_mask) & boundary_mask
+        miss_center = (~correct_mask) & (~boundary_mask)
+
+        g_corr_boundary = masked_mean(g_corr, corr_boundary)
+        g_corr_center = masked_mean(g_corr, corr_center)
+
+        g_miss_boundary = masked_mean(g_miss, miss_boundary)
+        g_miss_center = masked_mean(g_miss, miss_center)
+
+        new_corr_boundary = torch.clamp(
+            self.lambda_corr_boundary + self.rho * g_corr_boundary,
+            min=0.0,
+        )
+
+        new_corr_center = torch.clamp(
+            self.lambda_corr_center + self.rho * g_corr_center,
+            min=0.0,
+        )
+
+        new_miss_boundary = torch.clamp(
+            self.lambda_miss_boundary + self.rho * g_miss_boundary,
+            min=0.0,
+        )
+
+        new_miss_center = torch.clamp(
+            self.lambda_miss_center + self.rho * g_miss_center,
+            min=0.0,
+        )
+
+        self.lambda_corr_boundary_raw.copy_(self._inverse_softplus(new_corr_boundary))
+
+        self.lambda_corr_center_raw.copy_(self._inverse_softplus(new_corr_center))
+
+        self.lambda_miss_boundary_raw.copy_(self._inverse_softplus(new_miss_boundary))
+
+        self.lambda_miss_center_raw.copy_(self._inverse_softplus(new_miss_center))
+
+class BoundEBOAugLagLoss2(nn.Module):
+    """
+    Version pure Augmented Lagrangian, sans Log-Barrier.
+
+    Contraintes :
+        correct sample  -> energy <= margin_correct   (g_corr = energy - margin_correct <= 0)
+        wrong sample    -> energy >= margin_miss      (g_miss = margin_miss - energy   <= 0)
+
+    Les multiplicateurs de Lagrange sont mis a jour explicitement apres chaque batch.
+    """
+
+    def __init__(
+        self,
+        base_loss: nn.Module,
+
+        boundary_k: int = 1,
+
+        margin_correct: float = -25.0,
+        margin_miss: float = -5.0,
+
+        temperature: float = 1.0,
+
+        rho: float = 1.0,
+
+        lambda_init_corr_center: float = 0.01,
+        lambda_init_corr_boundary: float = 0.01,
+
+        lambda_init_miss_center: float = 0.01,
+        lambda_init_miss_boundary: float = 0.01,
+    ):
+        super().__init__()
+
+        self.base_loss = base_loss
+
+        self.boundary_k = boundary_k
+
+        self.margin_correct = margin_correct
+        self.margin_miss = margin_miss
+
+        self.temperature = temperature
+
+        self.rho = rho
+
+        self.lambda_corr_center_raw = nn.Parameter(
+            self._inverse_softplus(torch.tensor(lambda_init_corr_center)),
+            requires_grad=False,
+        )
+        self.lambda_corr_boundary_raw = nn.Parameter(
+            self._inverse_softplus(torch.tensor(lambda_init_corr_boundary)),
+            requires_grad=False,
+        )
+        self.lambda_miss_center_raw = nn.Parameter(
+            self._inverse_softplus(torch.tensor(lambda_init_miss_center)),
+            requires_grad=False,
+        )
+        self.lambda_miss_boundary_raw = nn.Parameter(
+            self._inverse_softplus(torch.tensor(lambda_init_miss_boundary)),
+            requires_grad=False,
+        )
+
+    @property
+    def lambda_corr_center(self):
+        return F.softplus(self.lambda_corr_center_raw)
+
+    @property
+    def lambda_corr_boundary(self):
+        return F.softplus(self.lambda_corr_boundary_raw)
+
+    @property
+    def lambda_miss_center(self):
+        return F.softplus(self.lambda_miss_center_raw)
+
+    @property
+    def lambda_miss_boundary(self):
+        return F.softplus(self.lambda_miss_boundary_raw)
+
+    @staticmethod
+    def _inverse_softplus(value: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+        value = torch.clamp(value, min=eps)
+        return value + torch.log(-torch.expm1(-value))
+
+    def forward(self, logits, targets, image=None):
+
+        base = self.base_loss(logits, targets)
+
+        energy = energy_fn(logits, self.temperature)
+
+        pred = torch.argmax(logits, dim=1)
+        correct_mask = pred == targets
+
+        boundary_mask = compute_boundary_mask(
+            targets,
+            k=self.boundary_k,
+            num_classes=logits.shape[1],
+        )
+
+        g_corr = energy - self.margin_correct
+        g_miss = self.margin_miss - energy
+
+        lambda_corr = torch.where(
+            boundary_mask,
+            self.lambda_corr_boundary.expand_as(energy),
+            self.lambda_corr_center.expand_as(energy),
+        )
+
+        lambda_miss = torch.where(
+            boundary_mask,
+            self.lambda_miss_boundary.expand_as(energy),
+            self.lambda_miss_center.expand_as(energy),
+        )
+
+        corr_term = lambda_corr * g_corr
+        miss_term = lambda_miss * g_miss
+
+        alm_term = torch.where(correct_mask, corr_term, miss_term)
+
+        return base + alm_term.mean()
+
+    @torch.no_grad()
+    def update_lambdas(self, logits, targets):
+        """
+        Mise a jour duale classique :
+            lambda <- max(0, lambda + rho * g(x))
+        """
+
+        energy = energy_fn(logits, self.temperature)
+
+        pred = torch.argmax(logits, dim=1)
+        correct_mask = pred == targets
+
+        boundary_mask = compute_boundary_mask(
+            targets,
+            k=self.boundary_k,
+            num_classes=logits.shape[1],
+        )
+
+        g_corr = energy - self.margin_correct
+        g_miss = self.margin_miss - energy
+
+        def masked_mean(x, mask):
+            if mask.sum() == 0:
+                return torch.tensor(0.0, device=x.device)
+            return x[mask].mean()
+
+        corr_boundary = correct_mask & boundary_mask
+        corr_center = correct_mask & (~boundary_mask)
+
+        miss_boundary = (~correct_mask) & boundary_mask
+        miss_center = (~correct_mask) & (~boundary_mask)
+
+        g_corr_boundary = masked_mean(g_corr, corr_boundary)
+        g_corr_center = masked_mean(g_corr, corr_center)
+
+        g_miss_boundary = masked_mean(g_miss, miss_boundary)
+        g_miss_center = masked_mean(g_miss, miss_center)
+
+        new_corr_boundary = torch.clamp(
+            self.lambda_corr_boundary + self.rho * g_corr_boundary,
+            min=0.0,
+        )
+
+        new_corr_center = torch.clamp(
+            self.lambda_corr_center + self.rho * g_corr_center,
+            min=0.0,
+        )
+
+        new_miss_boundary = torch.clamp(
+            self.lambda_miss_boundary + self.rho * g_miss_boundary,
+            min=0.0,
+        )
+
+        new_miss_center = torch.clamp(
+            self.lambda_miss_center + self.rho * g_miss_center,
+            min=0.0,
+        )
+
+        self.lambda_corr_boundary_raw.copy_(self._inverse_softplus(new_corr_boundary))
+
+        self.lambda_corr_center_raw.copy_(self._inverse_softplus(new_corr_center))
+
+        self.lambda_miss_boundary_raw.copy_(self._inverse_softplus(new_miss_boundary))
+
+        self.lambda_miss_center_raw.copy_(self._inverse_softplus(new_miss_center))
 
 def normalize_loss_name(loss_name: str) -> str:
     normalized = loss_name.lower()
@@ -546,6 +910,14 @@ def normalize_loss_name(loss_name: str) -> str:
         'boundlogebo': 'bound_log_ebo',
         'bound_ebo_log_barrier': 'bound_log_ebo',
         'boundary_log_ebo': 'bound_log_ebo',
+        'boundeboauglagloss': 'bound_ebo_aug_lag',
+        'bound_ebo_aug_lag_loss': 'bound_ebo_aug_lag',
+        'bound_aug_lag_ebo': 'bound_ebo_aug_lag',
+        'boundary_aug_lag_ebo': 'bound_ebo_aug_lag',
+        'boundeboauglogloss': 'bound_ebo_aug_log',
+        'bound_ebo_aug_log_loss': 'bound_ebo_aug_log',
+        'bound_aug_log_ebo': 'bound_ebo_aug_log',
+        'boundary_aug_log_ebo': 'bound_ebo_aug_log',
     }
     return aliases.get(normalized, normalized)
 
@@ -562,6 +934,7 @@ def build_loss(
     margin_correct: float = -35.0,
     margin_miss: float = -5.0,
     barrier_t: float = 1.0,
+    rho: float = 1.0,
 ) -> nn.Module:
     loss_name = normalize_loss_name(loss_name)
 
@@ -636,5 +1009,35 @@ def build_loss(
             t=barrier_t,
         )
 
+    if loss_name in {'bound_ebo_aug_lag'}:
+        if num_classes < 2:
+            raise ValueError('bound_ebo_aug_lag requires num_classes >= 2')
+        return BoundEBOAugLagLoss(
+            CEDiceLoss(num_classes),
+            boundary_k=boundary_k,
+            margin_correct=margin_correct,
+            margin_miss=margin_miss,
+            rho=rho,
+            lambda_init_corr_center=lambda_ebo_corr if lambda_ebo_cen_corr is None else lambda_ebo_cen_corr,
+            lambda_init_corr_boundary=lambda_ebo_corr if lambda_ebo_out_corr is None else lambda_ebo_out_corr,
+            lambda_init_miss_center=lambda_ebo_in if lambda_ebo_cen_in is None else lambda_ebo_cen_in,
+            lambda_init_miss_boundary=lambda_ebo_in if lambda_ebo_out_in is None else lambda_ebo_out_in,
+        )
+
+    if loss_name in {'bound_ebo_aug_log'}:
+        if num_classes < 2:
+            raise ValueError('bound_ebo_aug_log requires num_classes >= 2')
+        return BoundEBOAugLogLoss(
+            CEDiceLoss(num_classes),
+            boundary_k=boundary_k,
+            margin_correct=margin_correct,
+            margin_miss=margin_miss,
+            rho=rho,
+            lambda_init_corr_center=lambda_ebo_corr if lambda_ebo_cen_corr is None else lambda_ebo_cen_corr,
+            lambda_init_corr_boundary=lambda_ebo_corr if lambda_ebo_out_corr is None else lambda_ebo_out_corr,
+            lambda_init_miss_center=lambda_ebo_in if lambda_ebo_cen_in is None else lambda_ebo_cen_in,
+            lambda_init_miss_boundary=lambda_ebo_in if lambda_ebo_out_in is None else lambda_ebo_out_in,
+            t=barrier_t,
+        )
 
     raise ValueError(f'Unsupported loss: {loss_name}')
