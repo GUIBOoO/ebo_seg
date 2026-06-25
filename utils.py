@@ -197,6 +197,19 @@ def energy(logits, T=1):
     energy =  -T * torch.logsumexp(logits / T, dim=1)
     return energy
 
+def relu_score(softmax):
+    path = os.path.join(os.environ["SCRATCH"],"d_matrices","d_matrix_acdc_val_lambda_0.5.npy",)
+    d = torch.from_numpy(
+        np.load(path)
+    ).to(softmax.device, softmax.dtype)
+
+    return torch.einsum(
+        "bchw,cd,bdhw->bhw",
+        softmax,
+        d,
+        softmax,
+    )
+
 
 def compute_boundary_mask(
     labels: torch.Tensor,

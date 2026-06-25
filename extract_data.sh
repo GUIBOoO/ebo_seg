@@ -11,4 +11,4 @@ source ~/.bash_profile
 module load python/3.11.5 
 source /home/guibo/ebo-seg/bin/activate
 
-python extract_data.py 
+python extract_data_acdc.py 

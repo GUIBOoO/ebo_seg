@@ -3,9 +3,9 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
-
-import optuna
+from typing import Any, Dict, List, Tuple
+import os
+import math
 
 from losses import normalize_loss_name
 
@@ -28,6 +28,24 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument('--metric', choices=['loss', 'dice', 'iou', 'pixel_acc','fpr95'], default='dice')
     parser.add_argument('--selection-mode', choices=['best', 'last'], default='best')
     parser.add_argument('--python-bin', type=str, default=sys.executable)
+    parser.add_argument(
+        '--gpu-ids',
+        type=str,
+        default=None,
+        help='Liste de GPU a utiliser, separes par des virgules. Exemple: 0,1,2.',
+    )
+    parser.add_argument(
+        '--models-per-gpu',
+        type=int,
+        default=3,
+        help='Nombre d entrainements lances en parallele sur chaque GPU.',
+    )
+    parser.add_argument(
+        '--max-parallel',
+        type=int,
+        default=None,
+        help='Plafond optionnel du nombre total d entrainements lances en parallele.',
+    )
     parser.add_argument('--lambda-ebo-in-grid', type=float, nargs='+', default=[0.1])
     parser.add_argument('--lambda-ebo-corr-grid', type=float, nargs='+', default=[0.1])
     parser.add_argument('--lambda-ebo-cen-in-grid', type=float, nargs='+', default=[0.1])
@@ -171,6 +189,21 @@ def read_objective(history_path: Path, metric: str, selection_mode: str) -> Tupl
     return chosen_epoch['val'][metric], chosen_epoch['val']
 
 
+
+def resolve_gpu_ids(gpu_ids: str | None) -> List[str]:
+    if gpu_ids:
+        resolved = [gpu_id.strip() for gpu_id in gpu_ids.split(',') if gpu_id.strip()]
+    else:
+        visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+        if visible_devices:
+            resolved = [gpu_id.strip() for gpu_id in visible_devices.split(',') if gpu_id.strip()]
+        else:
+            resolved = ['0']
+
+    if not resolved:
+        raise ValueError('Aucun GPU disponible. Utilise --gpu-ids, par exemple --gpu-ids 0,1,2.')
+    return resolved
+
 def main() -> None:
     args = build_argparser().parse_args()
     args.loss = normalize_loss_name(args.loss)
@@ -186,16 +219,32 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     search_space = build_search_space(args)
-    sampler = optuna.samplers.GridSampler(search_space)
+    array_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", "0"))
+    array_count = int(os.environ.get("SLURM_ARRAY_TASK_COUNT", "1"))
+
+    def expand_grid(space):
+        import itertools
+        keys = list(space.keys())
+        values = list(space.values())
+        for combo in itertools.product(*values):
+            yield dict(zip(keys, combo))
+
+    all_configs = list(expand_grid(search_space))
+    total = len(all_configs)
+
+    chunk_size = math.ceil(total / array_count)
+
+    start = array_id * chunk_size
+    end = min(start + chunk_size, total)
+
     direction = 'minimize' if args.metric in ['loss','fpr95'] else 'maximize'
-    study = optuna.create_study(direction=direction, sampler=sampler)
     script_path = Path(__file__).resolve().parent / 'train_unet.py'
     results_path = args.output_dir / 'grid_search_results.json'
     best_path = args.output_dir / 'grid_search_best.json'
 
-    def objective(trial: optuna.Trial) -> float:
-        margin_correct = trial.suggest_categorical('margin_correct', search_space['margin_correct'])
-        margin_miss = trial.suggest_categorical('margin_miss', search_space['margin_miss'])
+    def build_trial(trial_number: int, config: Dict[str, Any]) -> Dict[str, Any]:
+        margin_correct = config['margin_correct']
+        margin_miss = config['margin_miss']
 
         command = [
             args.python_bin,
@@ -218,33 +267,37 @@ def main() -> None:
         ]
 
         if is_standard_ebo_loss(args.loss):
-            lambda_ebo_in = trial.suggest_categorical('lambda_ebo_in', search_space['lambda_ebo_in'])
-            lambda_ebo_corr = trial.suggest_categorical('lambda_ebo_corr', search_space['lambda_ebo_corr'])
+            lambda_ebo_in = config['lambda_ebo_in']
+            lambda_ebo_corr = config['lambda_ebo_corr']
+
             trial_name = (
-                f'trial_{trial.number:03d}_'
-                f'lin_{sanitize_float(lambda_ebo_in)}_'
-                f'lcorr_{sanitize_float(lambda_ebo_corr)}_'
-                f'mcorr_{sanitize_float(margin_correct)}_'
-                f'mmiss_{sanitize_float(margin_miss)}'
+                f"trial_{trial_number:03d}_"
+                f"lin_{sanitize_float(lambda_ebo_in)}_"
+                f"lcorr_{sanitize_float(lambda_ebo_corr)}_"
+                f"mcorr_{sanitize_float(margin_correct)}_"
+                f"mmiss_{sanitize_float(margin_miss)}"
             )
+
             command.extend([
                 '--lambda-ebo-in', str(lambda_ebo_in),
                 '--lambda-ebo-corr', str(lambda_ebo_corr),
             ])
         elif is_log_ebo_loss(args.loss):
-            lambda_ebo_in = trial.suggest_categorical('lambda_ebo_in', search_space['lambda_ebo_in'])
-            lambda_ebo_corr = trial.suggest_categorical('lambda_ebo_corr', search_space['lambda_ebo_corr'])
-            barrier_t = trial.suggest_categorical('barrier_t', search_space['barrier_t'])
-            barrier_t_growth = trial.suggest_categorical('barrier_t_growth', search_space['barrier_t_growth'])
+            lambda_ebo_in = config['lambda_ebo_in']
+            lambda_ebo_corr = config['lambda_ebo_corr']
+            barrier_t = config['barrier_t']
+            barrier_t_growth = config['barrier_t_growth']
+
             trial_name = (
-                f'trial_{trial.number:03d}_'
-                f'lin_{sanitize_float(lambda_ebo_in)}_'
-                f'lcorr_{sanitize_float(lambda_ebo_corr)}_'
-                f't_{sanitize_float(barrier_t)}_'
-                f'tg_{sanitize_float(barrier_t_growth)}_'
-                f'mcorr_{sanitize_float(margin_correct)}_'
-                f'mmiss_{sanitize_float(margin_miss)}'
+                f"trial_{trial_number:03d}_"
+                f"lin_{sanitize_float(lambda_ebo_in)}_"
+                f"lcorr_{sanitize_float(lambda_ebo_corr)}_"
+                f"t_{sanitize_float(barrier_t)}_"
+                f"tg_{sanitize_float(barrier_t_growth)}_"
+                f"mcorr_{sanitize_float(margin_correct)}_"
+                f"mmiss_{sanitize_float(margin_miss)}"
             )
+
             command.extend([
                 '--lambda-ebo-in', str(lambda_ebo_in),
                 '--lambda-ebo-corr', str(lambda_ebo_corr),
@@ -252,25 +305,27 @@ def main() -> None:
                 '--barrier-t-growth', str(barrier_t_growth),
             ])
         elif is_bound_log_ebo_loss(args.loss):
-            lambda_ebo_cen_in = trial.suggest_categorical('lambda_ebo_cen_in', search_space['lambda_ebo_cen_in'])
-            lambda_ebo_out_in = trial.suggest_categorical('lambda_ebo_out_in', search_space['lambda_ebo_out_in'])
-            lambda_ebo_cen_corr = trial.suggest_categorical('lambda_ebo_cen_corr', search_space['lambda_ebo_cen_corr'])
-            lambda_ebo_out_corr = trial.suggest_categorical('lambda_ebo_out_corr', search_space['lambda_ebo_out_corr'])
-            boundary_k = trial.suggest_categorical('boundary_k', search_space['boundary_k'])
-            barrier_t = trial.suggest_categorical('barrier_t', search_space['barrier_t'])
-            barrier_t_growth = trial.suggest_categorical('barrier_t_growth', search_space['barrier_t_growth'])
+            lambda_ebo_cen_in = config['lambda_ebo_cen_in']
+            lambda_ebo_out_in = config['lambda_ebo_out_in']
+            lambda_ebo_cen_corr = config['lambda_ebo_cen_corr']
+            lambda_ebo_out_corr = config['lambda_ebo_out_corr']
+            boundary_k = config['boundary_k']
+            barrier_t = config['barrier_t']
+            barrier_t_growth = config['barrier_t_growth']
+
             trial_name = (
-                f'trial_{trial.number:03d}_'
-                f'cenin_{sanitize_float(lambda_ebo_cen_in)}_'
-                f'outin_{sanitize_float(lambda_ebo_out_in)}_'
-                f'cencorr_{sanitize_float(lambda_ebo_cen_corr)}_'
-                f'outcorr_{sanitize_float(lambda_ebo_out_corr)}_'
-                f'bk_{boundary_k}_'
-                f't_{sanitize_float(barrier_t)}_'
-                f'tg_{sanitize_float(barrier_t_growth)}_'
-                f'mcorr_{sanitize_float(margin_correct)}_'
-                f'mmiss_{sanitize_float(margin_miss)}'
+                f"trial_{trial_number:03d}_"
+                f"cenin_{sanitize_float(lambda_ebo_cen_in)}_"
+                f"outin_{sanitize_float(lambda_ebo_out_in)}_"
+                f"cencorr_{sanitize_float(lambda_ebo_cen_corr)}_"
+                f"outcorr_{sanitize_float(lambda_ebo_out_corr)}_"
+                f"bk_{boundary_k}_"
+                f"t_{sanitize_float(barrier_t)}_"
+                f"tg_{sanitize_float(barrier_t_growth)}_"
+                f"mcorr_{sanitize_float(margin_correct)}_"
+                f"mmiss_{sanitize_float(margin_miss)}"
             )
+
             command.extend([
                 '--lambda-ebo-cen-in', str(lambda_ebo_cen_in),
                 '--lambda-ebo-out-in', str(lambda_ebo_out_in),
@@ -281,31 +336,35 @@ def main() -> None:
                 '--barrier-t-growth', str(barrier_t_growth),
             ])
         elif is_bound_aug_lag_ebo_loss(args.loss) or is_bound_aug_log_ebo_loss(args.loss):
-            lambda_ebo_cen_in = trial.suggest_categorical('lambda_ebo_cen_in', search_space['lambda_ebo_cen_in'])
-            lambda_ebo_out_in = trial.suggest_categorical('lambda_ebo_out_in', search_space['lambda_ebo_out_in'])
-            lambda_ebo_cen_corr = trial.suggest_categorical('lambda_ebo_cen_corr', search_space['lambda_ebo_cen_corr'])
-            lambda_ebo_out_corr = trial.suggest_categorical('lambda_ebo_out_corr', search_space['lambda_ebo_out_corr'])
-            boundary_k = trial.suggest_categorical('boundary_k', search_space['boundary_k'])
-            rho = trial.suggest_categorical('rho', search_space['rho'])
-            barrier_t = trial.suggest_categorical('barrier_t', search_space['barrier_t']) if is_bound_aug_log_ebo_loss(args.loss) else None
-            barrier_t_growth = trial.suggest_categorical('barrier_t_growth', search_space['barrier_t_growth']) if is_bound_aug_log_ebo_loss(args.loss) else None
+            lambda_ebo_cen_in = config['lambda_ebo_cen_in']
+            lambda_ebo_out_in = config['lambda_ebo_out_in']
+            lambda_ebo_cen_corr = config['lambda_ebo_cen_corr']
+            lambda_ebo_out_corr = config['lambda_ebo_out_corr']
+            boundary_k = config['boundary_k']
+            rho = config['rho']
+
+            barrier_t = config.get('barrier_t')
+            barrier_t_growth = config.get('barrier_t_growth')
+
             log_suffix = (
-                f't_{sanitize_float(barrier_t)}_'
-                f'tg_{sanitize_float(barrier_t_growth)}_'
-                if is_bound_aug_log_ebo_loss(args.loss) else ''
+                f"t_{sanitize_float(barrier_t)}_tg_{sanitize_float(barrier_t_growth)}_"
+                if is_bound_aug_log_ebo_loss(args.loss)
+                else ""
             )
+
             trial_name = (
-                f'trial_{trial.number:03d}_'
-                f'cenin_{sanitize_float(lambda_ebo_cen_in)}_'
-                f'outin_{sanitize_float(lambda_ebo_out_in)}_'
-                f'cencorr_{sanitize_float(lambda_ebo_cen_corr)}_'
-                f'outcorr_{sanitize_float(lambda_ebo_out_corr)}_'
-                f'bk_{boundary_k}_'
-                f'rho_{sanitize_float(rho)}_'
-                f'{log_suffix}'
-                f'mcorr_{sanitize_float(margin_correct)}_'
-                f'mmiss_{sanitize_float(margin_miss)}'
+                f"trial_{trial_number:03d}_"
+                f"cenin_{sanitize_float(lambda_ebo_cen_in)}_"
+                f"outin_{sanitize_float(lambda_ebo_out_in)}_"
+                f"cencorr_{sanitize_float(lambda_ebo_cen_corr)}_"
+                f"outcorr_{sanitize_float(lambda_ebo_out_corr)}_"
+                f"bk_{boundary_k}_"
+                f"rho_{sanitize_float(rho)}_"
+                f"{log_suffix}"
+                f"mcorr_{sanitize_float(margin_correct)}_"
+                f"mmiss_{sanitize_float(margin_miss)}"
             )
+
             command.extend([
                 '--lambda-ebo-cen-in', str(lambda_ebo_cen_in),
                 '--lambda-ebo-out-in', str(lambda_ebo_out_in),
@@ -314,27 +373,30 @@ def main() -> None:
                 '--boundary-k', str(boundary_k),
                 '--rho', str(rho),
             ])
+
             if is_bound_aug_log_ebo_loss(args.loss):
                 command.extend([
                     '--barrier-t', str(barrier_t),
                     '--barrier-t-growth', str(barrier_t_growth),
                 ])
         else:
-            lambda_ebo_cen_in = trial.suggest_categorical('lambda_ebo_cen_in', search_space['lambda_ebo_cen_in'])
-            lambda_ebo_out_in = trial.suggest_categorical('lambda_ebo_out_in', search_space['lambda_ebo_out_in'])
-            lambda_ebo_cen_corr = trial.suggest_categorical('lambda_ebo_cen_corr', search_space['lambda_ebo_cen_corr'])
-            lambda_ebo_out_corr = trial.suggest_categorical('lambda_ebo_out_corr', search_space['lambda_ebo_out_corr'])
-            boundary_k = trial.suggest_categorical('boundary_k', search_space['boundary_k'])
+            lambda_ebo_cen_in = config['lambda_ebo_cen_in']
+            lambda_ebo_out_in = config['lambda_ebo_out_in']
+            lambda_ebo_cen_corr = config['lambda_ebo_cen_corr']
+            lambda_ebo_out_corr = config['lambda_ebo_out_corr']
+            boundary_k = config['boundary_k']
+
             trial_name = (
-                f'trial_{trial.number:03d}_'
-                f'cenin_{sanitize_float(lambda_ebo_cen_in)}_'
-                f'outin_{sanitize_float(lambda_ebo_out_in)}_'
-                f'cencorr_{sanitize_float(lambda_ebo_cen_corr)}_'
-                f'outcorr_{sanitize_float(lambda_ebo_out_corr)}_'
-                f'bk_{boundary_k}_'
-                f'mcorr_{sanitize_float(margin_correct)}_'
-                f'mmiss_{sanitize_float(margin_miss)}'
+                f"trial_{trial_number:03d}_"
+                f"cenin_{sanitize_float(lambda_ebo_cen_in)}_"
+                f"outin_{sanitize_float(lambda_ebo_out_in)}_"
+                f"cencorr_{sanitize_float(lambda_ebo_cen_corr)}_"
+                f"outcorr_{sanitize_float(lambda_ebo_out_corr)}_"
+                f"bk_{boundary_k}_"
+                f"mcorr_{sanitize_float(margin_correct)}_"
+                f"mmiss_{sanitize_float(margin_miss)}"
             )
+
             command.extend([
                 '--lambda-ebo-cen-in', str(lambda_ebo_cen_in),
                 '--lambda-ebo-out-in', str(lambda_ebo_out_in),
@@ -342,7 +404,6 @@ def main() -> None:
                 '--lambda-ebo-out-corr', str(lambda_ebo_out_corr),
                 '--boundary-k', str(boundary_k),
             ])
-
         trial_dir = args.output_dir / trial_name
         trial_dir.mkdir(parents=True, exist_ok=True)
         output_dir_idx = command.index('--output-dir') + 1
@@ -350,55 +411,117 @@ def main() -> None:
 
         command = [arg for arg in command if arg is not None]
 
-        print(f'[{trial.number + 1}/{total_trials}] Lancement: {trial_name}')
-        subprocess.run(command, check=True, cwd=script_path.parent)
-
-        history_path = trial_dir / f'history_{args.loss}.json'
-        objective_value, val_metrics = read_objective(history_path, args.metric, args.selection_mode)
-
-        trial.set_user_attr('trial_dir', str(trial_dir))
-        trial.set_user_attr('val_metrics', val_metrics)
-        trial.set_user_attr('command', command)
-
-        return objective_value
+        return {
+            'number': trial_number,
+            'params': config,
+            'trial_name': trial_name,
+            'trial_dir': trial_dir,
+            'command': command,
+        }
 
     total_trials = 1
     for values in search_space.values():
         total_trials *= len(values)
 
+    gpu_ids = resolve_gpu_ids(args.gpu_ids)
+    if args.models_per_gpu < 1:
+        raise ValueError('--models-per-gpu doit etre >= 1.')
+    if args.max_parallel is not None and args.max_parallel < 1:
+        raise ValueError('--max-parallel doit etre >= 1.')
+
+    max_parallel = len(gpu_ids) * args.models_per_gpu
+    if args.max_parallel is not None:
+        max_parallel = min(max_parallel, args.max_parallel)
+    if max_parallel < 1:
+        raise ValueError('Le parallelisme total doit etre >= 1.')
+
+    trials = [
+        build_trial(global_idx, config)
+        for global_idx, config in enumerate(all_configs[start:end], start=start)
+    ]
+
     print(f'Nombre total de combinaisons: {total_trials}')
+    print(f'Combinaisons pour cette tache: {len(trials)} ({start} a {end - 1})')
+    print(
+        f'GPUs utilises: {gpu_ids} | '
+        f'modeles/GPU: {args.models_per_gpu} | '
+        f'parallele total: {max_parallel}'
+    )
     print(json.dumps(search_space, indent=2))
 
-    study.optimize(objective, n_trials=total_trials)
+    results = []
+    for batch_start in range(0, len(trials), max_parallel):
+        batch = trials[batch_start:batch_start + max_parallel]
+        processes = []
 
-    completed_trials = [trial for trial in study.trials if trial.value is not None]
+        for slot, trial in enumerate(batch):
+            gpu_id = gpu_ids[slot % len(gpu_ids)]
+            env = os.environ.copy()
+            env['CUDA_VISIBLE_DEVICES'] = gpu_id
+            print(f"[{trial['number'] + 1}/{total_trials}] GPU {gpu_id}: {trial['trial_name']}")
+            process = subprocess.Popen(
+                trial['command'],
+                cwd=script_path.parent,
+                env=env,
+            )
+            processes.append((process, trial, gpu_id))
+
+        failed = []
+        for process, trial, gpu_id in processes:
+            return_code = process.wait()
+            if return_code != 0:
+                failed.append((trial, gpu_id, return_code))
+                results.append({
+                    'number': trial['number'],
+                    'value': None,
+                    'params': trial['params'],
+                    'state': 'FAIL',
+                    'trial_dir': str(trial['trial_dir']),
+                    'val_metrics': None,
+                    'command': trial['command'],
+                    'gpu_id': gpu_id,
+                    'return_code': return_code,
+                })
+                continue
+
+            history_path = trial['trial_dir'] / f'history_{args.loss}.json'
+            objective_value, val_metrics = read_objective(history_path, args.metric, args.selection_mode)
+            results.append({
+                'number': trial['number'],
+                'value': objective_value,
+                'params': trial['params'],
+                'state': 'COMPLETE',
+                'trial_dir': str(trial['trial_dir']),
+                'val_metrics': val_metrics,
+                'command': trial['command'],
+                'gpu_id': gpu_id,
+            })
+
+        results_path.write_text(json.dumps(results, indent=2), encoding='utf-8')
+        if failed:
+            details = ', '.join(
+                f"{trial['trial_name']} sur GPU {gpu_id} (code {return_code})"
+                for trial, gpu_id, return_code in failed
+            )
+            raise subprocess.CalledProcessError(failed[0][2], failed[0][0]['command'], details)
+
+    completed_trials = [trial for trial in results if trial['value'] is not None]
     if not completed_trials:
         raise RuntimeError('Aucun essai complete dans la grid search.')
 
-    results = []
-    for trial in study.trials:
-        result = {
-            'number': trial.number,
-            'value': trial.value,
-            'params': trial.params,
-            'state': trial.state.name,
-            'trial_dir': trial.user_attrs.get('trial_dir'),
-            'val_metrics': trial.user_attrs.get('val_metrics'),
-            'command': trial.user_attrs.get('command'),
-        }
-        results.append(result)
-
-    results_path.write_text(json.dumps(results, indent=2), encoding='utf-8')
-
-    best_trial = study.best_trial
+    best_trial = (
+        min(completed_trials, key=lambda trial: trial['value'])
+        if direction == 'minimize'
+        else max(completed_trials, key=lambda trial: trial['value'])
+    )
     best_payload = {
         'metric': args.metric,
         'selection_mode': args.selection_mode,
         'direction': direction,
-        'best_value': best_trial.value,
-        'best_params': best_trial.params,
-        'trial_dir': best_trial.user_attrs.get('trial_dir'),
-        'val_metrics': best_trial.user_attrs.get('val_metrics'),
+        'best_value': best_trial['value'],
+        'best_params': best_trial['params'],
+        'trial_dir': best_trial['trial_dir'],
+        'val_metrics': best_trial['val_metrics'],
     }
     if args.metric == 'fpr95' and args.selection_mode == 'best':
         best_payload['selection_rule'] = 'best_val_loss_per_config_then_min_fpr95'

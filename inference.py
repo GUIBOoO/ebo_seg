@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -20,7 +21,7 @@ from metrics import (
     compute_multiclass_metrics_from_preds,
 )
 from models import build_model_acdc, build_model_brats
-from utils import SIRC, doctor, energy, hybrid_energy
+from utils import SIRC, doctor, energy, hybrid_energy, relu_score
 
 
 SCORE_NAMES = ("msp", "alpha", "beta", "energy", "hybrid_energy", "sirc")
@@ -106,6 +107,7 @@ def _compute_score_maps(
     energy_map = energy(logits, temperature)
     hybrid_energy_map = hybrid_energy(logits, images, T=temperature)
     sirc = SIRC(msp, 1, energy_map, b=1, a=1)
+    # relu = relu_score(softmax)
 
     return {
         "msp": -msp,
@@ -113,7 +115,8 @@ def _compute_score_maps(
         "beta": beta,
         "energy": energy_map,
         "hybrid_energy": hybrid_energy_map,
-         "sirc": -sirc,
+        "sirc": -sirc,
+        # "relu": relu,
     }
 
 def _compute_detection_metrics(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float | None]:
@@ -379,7 +382,7 @@ def save_visualizations(
     vis_dir = output_dir / "visualizations"
     vis_dir.mkdir(parents=True, exist_ok=True)
 
-    score_order = ["msp", "alpha", "beta", "energy", "hybrid_energy", "sirc"]
+    score_order = ["msp", "alpha", "beta", "energy", "hybrid_energy", "sirc", "relu"]
     for sample in list(per_sample)[:num_samples]:
         image = _to_numpy_image(sample["image"])
         mask = sample["mask"].numpy()
@@ -398,7 +401,7 @@ def save_visualizations(
         axes[2].imshow(pred, cmap="tab20")
         axes[2].set_title("Prediction")
 
-        axes[3].imshow(error, cmap="gray")
+        axes[3].imshow(error, cmap="gray_r")
         axes[3].set_title("Error")
 
         for axis, score_name in zip(axes[4:10], score_order):
@@ -406,21 +409,53 @@ def save_visualizations(
             axis.set_title(score_name.upper())
 
         energy = sample["scores"]["energy"].numpy()
-        high_energy = (energy > energy_threshold).astype(np.uint8)
+        rejected_energy = energy < energy_threshold
         msp = -sample["scores"]["msp"].numpy()
-        high_msp = (msp > msp_threshold).astype(np.uint8)
+        rejected_msp = msp > msp_threshold
+        error_pixels = error.astype(bool)
+        correct_pixels = ~error_pixels
+        summary_energy_detected = energy > -5.0
+        summary_msp_detected = msp < 0.999
 
-        axes[10].imshow(high_energy, cmap="gray")
-        axes[10].set_title(f"Energy > {energy_threshold}")
+        rejection_summary = np.zeros((*error.shape, 3), dtype=np.float32)
+        rejection_summary[correct_pixels & summary_energy_detected] = (0.95, 0.55, 0.15)
+        rejection_summary[correct_pixels & summary_msp_detected] = (0.55, 0.30, 0.85)
+        rejection_summary[correct_pixels & summary_energy_detected & summary_msp_detected] = (0.10, 0.75, 0.35)
+        rejection_summary[error_pixels & summary_energy_detected] = (0.90, 0.10, 0.10)
+        rejection_summary[error_pixels & summary_msp_detected] = (0.10, 0.35, 0.95)
+        rejection_summary[error_pixels & summary_energy_detected & summary_msp_detected] = (1.00, 0.90, 0.05)
 
-        axes[11].imshow(high_msp, cmap="gray")
+        axes[10].imshow(rejected_energy.astype(np.uint8), cmap="gray")
+        axes[10].set_title(f"Energy < {energy_threshold}")
+
+        axes[11].imshow(rejected_msp.astype(np.uint8), cmap="gray")
         axes[11].set_title(f"MSP > {msp_threshold}")
+
+        legend_handles = [
+            Patch(color=(0.90, 0.10, 0.10), label="Error: energy"),
+            Patch(color=(0.10, 0.35, 0.95), label="Error: MSP"),
+            Patch(color=(1.00, 0.90, 0.05), label="Error: both"),
+            Patch(color=(0.95, 0.55, 0.15), label="Correct: energy"),
+            Patch(color=(0.55, 0.30, 0.85), label="Correct: MSP"),
+            Patch(color=(0.10, 0.75, 0.35), label="Correct: both"),
+        ]
 
         plt.tight_layout()
         save_path = vis_dir / f"sample_{sample['sample_id']:04d}.png"
         plt.savefig(save_path)
         plt.close(fig)
         print(f"Saved visualization to {save_path}")
+
+        summary_fig, summary_axis = plt.subplots(1, 1, figsize=(8, 8))
+        summary_axis.imshow(rejection_summary)
+        summary_axis.set_title("Detected pixels summary")
+        summary_axis.axis("off")
+        summary_fig.legend(handles=legend_handles, loc="lower center", ncol=3, frameon=False)
+        summary_fig.tight_layout(rect=(0, 0.08, 1, 1))
+        summary_path = vis_dir / f"sample_{sample['sample_id']:04d}_detected_pixels_summary.png"
+        summary_fig.savefig(summary_path)
+        plt.close(summary_fig)
+        print(f"Saved detected pixels summary to {summary_path}")
 
 
 

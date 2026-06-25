@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=00:15:00
+#SBATCH --time=01:00:00
 #SBATCH --partition=compute_full_node
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -15,7 +15,7 @@ source /home/guibo/ebo-seg/bin/activate
 set -euo pipefail
 
 ROOT_DIR="/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg"
-DATASET="${DATASET:-acdc}"
+DATASET="${DATASET:-brats}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 case "$DATASET_LOWER" in
@@ -23,11 +23,11 @@ case "$DATASET_LOWER" in
     DATA_DIR="$SLURM_TMPDIR/dataset/ACDC/database"
     DATASET_ZIP="$SCRATCH/datasets/ACDC/ACDC.zip"
     UNZIP_TARGET="$SLURM_TMPDIR/dataset"
-    DEFAULT_MODEL_ROOT="/home/guibo/links/scratch/grid_search"
+    DEFAULT_MODEL_ROOT="/home/guibo/links/scratch/grid_search/1.005log3boundebo1margin"
     ;;
   brats)
     DATA_DIR="$SCRATCH/datasets/Brats/data_slices"
-    DEFAULT_MODEL_ROOT="/home/guibo/links/scratch/models/ebo_seg/brats/grid_search"
+    DEFAULT_MODEL_ROOT="/home/guibo/links/scratch/grid_search/brats/ebo_ce"
     ;;
   *)
     echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc' or 'brats'."
@@ -58,8 +58,8 @@ DATASET_ROOT="${DATASET_ROOT:-$DATA_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 MODEL_ROOT="${MODEL_ROOT:-$DEFAULT_MODEL_ROOT}"
 BEST_CONFIG_JSON="${BEST_CONFIG_JSON:-$MODEL_ROOT/grid_search_best.json}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/home/guibo/links/scratch/inference/grid_search}"
-CHECKPOINT_NAME="${CHECKPOINT_NAME:-best_bound_ebo_aug_lag.pt}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/home/guibo/links/scratch/inference/brats/grid_search_ebo}"
+CHECKPOINT_NAME="${CHECKPOINT_NAME:-best_ebo_ce.pt}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 DEVICE="${DEVICE:-cuda}"
 NUM_SAMPLES="${NUM_SAMPLES:-4}"

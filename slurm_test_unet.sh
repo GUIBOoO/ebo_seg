@@ -54,7 +54,7 @@ DATASET_ROOT="${DATASET_ROOT:-$DATA_DIR}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 if [ "$DATASET_LOWER" = "acdc" ]; then
-    DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/acdc/3boundlogebo_10_5_outin5_cenin2/best_bound_log_ebo.pt"
+    DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/acdc/baseline_ce_dice/best_ce_dice.pt"
     DEFAULT_OUTPUT_DIR="/home/guibo/links/scratch/inference/acdc/inference_3boundlogebo_10_5_outin5_cenin2"
 else
     DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/brats/hybridebo_17_5_2in/best_hybrid_ebo_ce.pt"
