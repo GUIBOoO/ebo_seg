@@ -4,6 +4,11 @@ import torch.nn.functional as F
 
 from utils import compute_boundary_mask, energy as energy_fn, hybrid_energy
 
+def _prepare_targets_for_logits(targets: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+    if targets.ndim == logits.ndim and targets.shape[1] == 1:
+        targets = targets[:, 0]
+    return targets.long()
+
 class DiceLoss(nn.Module):
     def __init__(self, num_classes, smooth=1e-5):
         super().__init__()
@@ -11,11 +16,12 @@ class DiceLoss(nn.Module):
         self.smooth = smooth
 
     def forward(self, logits, targets):
+        targets = _prepare_targets_for_logits(targets, logits)
         probs = torch.softmax(logits, dim=1)
 
         targets_onehot = F.one_hot(targets, num_classes=self.num_classes)
-        targets_onehot = targets_onehot.permute(0, 3, 1, 2).float()
-        dims = (0, 2, 3)
+        targets_onehot = targets_onehot.movedim(-1, 1).float()
+        dims = (0,) + tuple(range(2, probs.ndim))
 
         intersection = torch.sum(probs * targets_onehot, dims)
         union = torch.sum(probs + targets_onehot, dims)
@@ -34,6 +40,7 @@ class CEDiceLoss(nn.Module):
         self.w_dice = weight_dice
 
     def forward(self, logits, targets):
+        targets = _prepare_targets_for_logits(targets, logits)
         ce_loss = self.ce(logits, targets)
         dice_loss = self.dice(logits, targets)
         return self.w_ce * ce_loss + self.w_dice * dice_loss
@@ -58,6 +65,7 @@ class EBOLoss(nn.Module):
         self.temperature = temperature
 
     def forward(self, logits, targets, image=None):
+        targets = _prepare_targets_for_logits(targets, logits)
         base = self.base_loss(logits, targets)
 
         energy = energy_fn(logits, self.temperature)
@@ -100,6 +108,7 @@ class BoundEBOLoss(nn.Module):
         self.temperature = temperature
 
     def forward(self, logits, targets, image=None):
+        targets = _prepare_targets_for_logits(targets, logits)
         base = self.base_loss(logits, targets)
 
         energy = energy_fn(logits, self.temperature)
@@ -153,6 +162,7 @@ class HybridEBOLoss(nn.Module):
         self.temperature = temperature
 
     def forward(self, logits, targets, image):
+        targets = _prepare_targets_for_logits(targets, logits)
         base = self.base_loss(logits, targets)
 
         energy = hybrid_energy(logits, image, T=self.temperature)
@@ -218,6 +228,7 @@ class EBOLossLogBarrier(nn.Module):
         self.barrier = LogBarrierExtended()
 
     def forward(self, logits, targets):
+        targets = _prepare_targets_for_logits(targets, logits)
 
         base = self.base_loss(logits, targets)
 
@@ -283,6 +294,7 @@ class BoundEBOLogBarrierLoss(nn.Module):
 
     def forward(self, logits, targets, image=None):
 
+        targets = _prepare_targets_for_logits(targets, logits)
         base = self.base_loss(logits, targets)
 
         energy = energy_fn(logits, self.temperature)
@@ -406,6 +418,7 @@ class BoundEBOAugLagLoss(nn.Module):
 
     def forward(self, logits, targets, image=None):
 
+        targets = _prepare_targets_for_logits(targets, logits)
         base = self.base_loss(logits, targets)
 
         energy = energy_fn(logits, self.temperature)
@@ -602,6 +615,7 @@ class BoundEBOAugLogLoss(nn.Module):
 
     def forward(self, logits, targets, image=None):
 
+        targets = _prepare_targets_for_logits(targets, logits)
         base = self.base_loss(logits, targets)
 
         energy = energy_fn(logits, self.temperature)
@@ -793,6 +807,7 @@ class BoundEBOAugLagLoss2(nn.Module):
 
     def forward(self, logits, targets, image=None):
 
+        targets = _prepare_targets_for_logits(targets, logits)
         base = self.base_loss(logits, targets)
 
         energy = energy_fn(logits, self.temperature)

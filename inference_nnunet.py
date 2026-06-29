@@ -73,7 +73,7 @@ for fold in range(5):
         checkpoint_name="checkpoint_best.pth"
     )
 
-
+    print(predictor.dataset_json.keys())
     val_cases = predictor.dataset_json["validation"]
 
 
