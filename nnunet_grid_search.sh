@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --time=24:00:00
-#SBATCH --array=0-23
+#SBATCH --array=0
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --output=/scratch/guibo/slurm_outputs/slurm-%j.out
@@ -14,7 +14,7 @@ module load python/3.10.13
 source ~/nnunet/bin/activate
 
 ROOT_DIR="${ROOT_DIR:-/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg}"
-DATASET_ID="${DATASET_ID:-2}"
+DATASET_ID="${DATASET_ID:-1}"
 CONFIGURATION="${CONFIGURATION:-2d}"
 FOLD="${FOLD:-0}"
 PLANS="${PLANS:-nnUNetPlans}"
@@ -22,6 +22,8 @@ LOSS="${LOSS:-bound_log_ebo}"
 CONTINUE="${CONTINUE:-0}"
 DEVICE="${DEVICE:-cuda}"
 NUM_GPUS="${NUM_GPUS:-}"
+NNUNET_FPR95_MAX_PIXELS="${NNUNET_FPR95_MAX_PIXELS:-200000}"
+NNUNET_FPR95_MAX_PIXELS_PER_BATCH="${NNUNET_FPR95_MAX_PIXELS_PER_BATCH:-50000}"
 
 export nnUNet_raw="${nnUNet_raw:-/scratch/$USER/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-/scratch/$USER/nnUNet_preprocessed}"
@@ -29,6 +31,24 @@ NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_s
 export nnUNet_compile="${nnUNet_compile:-False}"
 export nnUNet_extTrainer="${nnUNet_extTrainer:-$ROOT_DIR/nnunet_ext_trainers}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
+export NNUNET_FPR95_MAX_PIXELS
+export NNUNET_FPR95_MAX_PIXELS_PER_BATCH
+SELECT_BEST="${SELECT_BEST:-0}"
+BEST_OUTPUT_JSON="${BEST_OUTPUT_JSON:-$NNUNET_RESULTS_BASE/nnunet_grid_search_best.json}"
+
+if [ "$SELECT_BEST" = "1" ]; then
+    cd "$ROOT_DIR"
+    python select_nnunet_grid_best.py \
+        --results-base "$NNUNET_RESULTS_BASE" \
+        --output-json "$BEST_OUTPUT_JSON" \
+        --fold "$FOLD"
+    exit 0
+fi
+
+if [[ "$FOLD" == "all" || "$FOLD" == *","* ]]; then
+    echo "ERROR: nnunet_grid_search.sh trains exactly one fold. Set FOLD to a single integer, for example FOLD=0."
+    exit 1
+fi
 
 LAMBDA_EBO_IN_GRID="${LAMBDA_EBO_IN_GRID:-0.5 2 5}"
 LAMBDA_EBO_CORR_GRID="${LAMBDA_EBO_CORR_GRID:-0.1}"
@@ -148,7 +168,7 @@ export BARRIER_T_GROWTH="${BARRIER_T_GROWTH:-1.0}"
 export RHO="${RHO:-1.0}"
 
 TRAINER="${TRAINER:-$(trainer_for_loss "$LOSS")}"
-TRIAL_NAME="trial_$(printf '%03d' "$TASK_ID")_${LOSS}_cenin_$(sanitize "$LAMBDA_EBO_CEN_IN")_outin_$(sanitize "$LAMBDA_EBO_OUT_IN")_cencorr_$(sanitize "$LAMBDA_EBO_CEN_CORR")_outcorr_$(sanitize "$LAMBDA_EBO_OUT_CORR")_lin_$(sanitize "$LAMBDA_EBO_IN")_lcorr_$(sanitize "$LAMBDA_EBO_CORR")_bk_${BOUNDARY_K}_mcorr_$(sanitize "$MARGIN_CORRECT")_mmiss_$(sanitize "$MARGIN_MISS")_t_$(sanitize "$BARRIER_T")_tg_$(sanitize "$BARRIER_T_GROWTH")"
+TRIAL_NAME="trial_$(printf '%03d' "$TASK_ID")_fold_${FOLD}_${LOSS}_cenin_$(sanitize "$LAMBDA_EBO_CEN_IN")_outin_$(sanitize "$LAMBDA_EBO_OUT_IN")_cencorr_$(sanitize "$LAMBDA_EBO_CEN_CORR")_outcorr_$(sanitize "$LAMBDA_EBO_OUT_CORR")_lin_$(sanitize "$LAMBDA_EBO_IN")_lcorr_$(sanitize "$LAMBDA_EBO_CORR")_bk_${BOUNDARY_K}_mcorr_$(sanitize "$MARGIN_CORRECT")_mmiss_$(sanitize "$MARGIN_MISS")_t_$(sanitize "$BARRIER_T")_tg_$(sanitize "$BARRIER_T_GROWTH")"
 export nnUNet_results="$NNUNET_RESULTS_BASE/$TRIAL_NAME"
 mkdir -p "$nnUNet_results"
 
@@ -159,9 +179,11 @@ echo "Task           : $TASK_ID / $TOTAL"
 echo "Dataset ID     : $DATASET_ID"
 echo "Configuration  : $CONFIGURATION"
 echo "Fold           : $FOLD"
+echo "Fold mode      : single fold only"
 echo "Trainer        : $TRAINER"
 echo "Loss           : $LOSS"
 echo "nnUNet_results : $nnUNet_results"
+echo "FPR95 pixels   : max=$NNUNET_FPR95_MAX_PIXELS per_batch=$NNUNET_FPR95_MAX_PIXELS_PER_BATCH"
 echo "Params         : lin=$LAMBDA_EBO_IN lcorr=$LAMBDA_EBO_CORR cenin=$LAMBDA_EBO_CEN_IN outin=$LAMBDA_EBO_OUT_IN cencorr=$LAMBDA_EBO_CEN_CORR outcorr=$LAMBDA_EBO_OUT_CORR bk=$BOUNDARY_K mcorr=$MARGIN_CORRECT mmiss=$MARGIN_MISS t=$BARRIER_T tg=$BARRIER_T_GROWTH rho=$RHO"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 
