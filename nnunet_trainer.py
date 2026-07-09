@@ -14,7 +14,7 @@ from nnunetv2.training.loss.dice import get_tp_fp_fn_tn
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.helpers import dummy_context
 
-from losses import build_loss, normalize_loss_name
+from losses import CEDiceLoss, build_loss, normalize_loss_name
 
 
 def _energy(logits: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
@@ -398,3 +398,23 @@ class BoundEBOTrainer(_EBOTrainerBase):
 
 class BoundEBOLogBarrierTrainer(_EBOTrainerBase):
     loss_name = "bound_log_ebo"
+
+
+class CEDiceTrainer(nnUNetTrainer):
+    """Plain nnU-Net trainer using CEDiceLoss (CE + Dice), no EBO term."""
+
+    def _build_loss(self):
+        num_classes = self.label_manager.num_segmentation_heads
+        loss = CEDiceLoss(num_classes)
+
+        if self.enable_deep_supervision:
+            deep_supervision_scales = self._get_deep_supervision_scales()
+            weights = np.array([1 / (2 ** i) for i in range(len(deep_supervision_scales))])
+            if self.is_ddp and not self._do_i_compile():
+                weights[-1] = 1e-6
+            else:
+                weights[-1] = 0
+            weights = weights / weights.sum()
+            loss = DeepSupervisionWrapper(loss, weights)
+
+        return loss

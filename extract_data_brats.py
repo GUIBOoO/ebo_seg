@@ -6,11 +6,17 @@ import nibabel as nib
 import numpy as np
 from tqdm import tqdm
 
+from nnunet_split_utils import (
+    split_ids_train_val_test,
+    write_splits_final_json,
+    write_test_identifiers,
+)
+
 SCRATCH = os.environ["SCRATCH"]
 
 TRAIN_DIR = Path(SCRATCH) / "datasets/Brats/training_data1_v2"
 
-DATASET_ID = 1
+DATASET_ID = 2
 DATASET_NAME = f"Dataset{DATASET_ID:03d}_BraTS2D"
 
 NNUNET_ROOT = Path(SCRATCH) / "nnUNet_raw" / DATASET_NAME
@@ -20,6 +26,10 @@ LABELS_TR = NNUNET_ROOT / "labelsTr"
 MODALITIES = ["t1n", "t1c", "t2w", "t2f"]
 
 SKIP_EMPTY_SLICES = True
+
+NNUNET_SPLIT_VAL_SIZE = float(os.environ.get("NNUNET_SPLIT_VAL_SIZE", "0.2"))
+NNUNET_SPLIT_TEST_SIZE = float(os.environ.get("NNUNET_SPLIT_TEST_SIZE", "0.1"))
+NNUNET_SPLIT_SEED = int(os.environ.get("NNUNET_SPLIT_SEED", "42"))
 
 
 def find_patient_files(case_dir: Path):
@@ -95,7 +105,7 @@ def process_patient(case_dir: Path, patient_idx: int):
 
     if result is None:
         print(f"Skipping {case_dir.name}")
-        return 0
+        return []
 
     imgs_paths, seg_path = result
 
@@ -112,7 +122,7 @@ def process_patient(case_dir: Path, patient_idx: int):
 
     n_slices = img_vol.shape[-1]
 
-    written = 0
+    written_case_ids = []
 
     for slice_idx in range(n_slices):
 
@@ -131,9 +141,9 @@ def process_patient(case_dir: Path, patient_idx: int):
             case_id,
         )
 
-        written += 1
+        written_case_ids.append(case_id)
 
-    return written
+    return written_case_ids
 
 
 def write_dataset_json(num_cases: int):
@@ -173,19 +183,61 @@ def main():
 
     print(f"Found {len(patients)} patients")
 
+    # Enumerate ALL patient dirs first (keeps case-id numbering stable), then
+    # keep only the ones with a complete set of modalities + segmentation.
+    valid_patient_indices = [
+        patient_idx
+        for patient_idx, patient_dir in enumerate(patients)
+        if find_patient_files(patient_dir) is not None
+    ]
+
+    train_indices, val_indices, test_indices = split_ids_train_val_test(
+        valid_patient_indices,
+        val_size=NNUNET_SPLIT_VAL_SIZE,
+        test_size=NNUNET_SPLIT_TEST_SIZE,
+        seed=NNUNET_SPLIT_SEED,
+    )
+    split_by_index = {
+        **{idx: "train" for idx in train_indices},
+        **{idx: "val" for idx in val_indices},
+        **{idx: "test" for idx in test_indices},
+    }
+
+    case_ids_by_split = {"train": [], "val": [], "test": []}
     total_cases = 0
 
     for patient_idx, patient_dir in enumerate(tqdm(patients)):
-        total_cases += process_patient(
-            patient_dir,
-            patient_idx,
-        )
+        if patient_idx not in split_by_index:
+            continue
+
+        written_case_ids = process_patient(patient_dir, patient_idx)
+        total_cases += len(written_case_ids)
+        case_ids_by_split[split_by_index[patient_idx]].extend(written_case_ids)
 
     write_dataset_json(total_cases)
+
+    write_splits_final_json(
+        NNUNET_ROOT / "splits_final.json",
+        train_case_ids=case_ids_by_split["train"],
+        val_case_ids=case_ids_by_split["val"],
+    )
+    write_test_identifiers(
+        NNUNET_ROOT / "test_identifiers.json",
+        test_case_ids=case_ids_by_split["test"],
+    )
 
     print(f"Done.")
     print(f"Dataset location: {NNUNET_ROOT}")
     print(f"Number of 2D cases: {total_cases}")
+    print(
+        f"Patients -> train: {len(train_indices)}, val: {len(val_indices)}, "
+        f"test: {len(test_indices)}"
+    )
+    print(
+        f"Slices   -> train: {len(case_ids_by_split['train'])}, "
+        f"val: {len(case_ids_by_split['val'])}, "
+        f"test: {len(case_ids_by_split['test'])}"
+    )
 
 
 if __name__ == "__main__":

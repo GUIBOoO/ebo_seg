@@ -18,11 +18,11 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 
 export nnUNet_raw="${nnUNet_raw:-/scratch/$USER/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-/scratch/$USER/nnUNet_preprocessed}"
-NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search}"
+NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/BraTS}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 
 BEST_CONFIG_JSON="${BEST_CONFIG_JSON:-$NNUNET_RESULTS_BASE/nnunet_grid_search_best.json}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/scratch/$USER/nnUNet_inference_grid_search}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/scratch/$USER/nnUNet_inference_grid_search/BraTS}"
 CHECKPOINT_NAME="${CHECKPOINT_NAME:-checkpoint_best.pth}"
 DEVICE="${DEVICE:-cuda}"
 TILE_STEP_SIZE="${TILE_STEP_SIZE:-0.5}"
@@ -30,6 +30,8 @@ SKIP_EXISTING="${SKIP_EXISTING:-1}"
 TRIAL_FILTER="${TRIAL_FILTER:-}"
 PERFORM_EVERYTHING_ON_DEVICE="${PERFORM_EVERYTHING_ON_DEVICE:-0}"
 DISABLE_MIRRORING="${DISABLE_MIRRORING:-0}"
+# Optional: .npy/.pt produced by compute_d_matrix_nnunet.sh. Enables the RELU score.
+D_MATRIX="${D_MATRIX:-}"
 
 if [ ! -f "$BEST_CONFIG_JSON" ]; then
     echo "ERROR: best config JSON not found: $BEST_CONFIG_JSON"
@@ -71,6 +73,14 @@ fi
 if [ "$DISABLE_MIRRORING" = "1" ]; then
     extra_args+=(--disable-mirroring)
 fi
+if [ -n "$D_MATRIX" ]; then
+    if [ ! -f "$D_MATRIX" ]; then
+        echo "ERROR: D matrix not found: $D_MATRIX"
+        echo "Produce it with: SPLIT=val bash compute_d_matrix_nnunet.sh"
+        exit 1
+    fi
+    extra_args+=(--d-matrix "$D_MATRIX")
+fi
 
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
 echo "Best config    : $BEST_CONFIG_JSON"
@@ -78,6 +88,7 @@ echo "Best trial     : $best_trial_name"
 echo "Checkpoint     : ${best_checkpoint:-from JSON/model folder}"
 echo "Preprocessed   : $nnUNet_preprocessed"
 echo "Output         : $output_dir"
+echo "D matrix       : ${D_MATRIX:-none (RELU score disabled)}"
 echo "Device         : $DEVICE"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 

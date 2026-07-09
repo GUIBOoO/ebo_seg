@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=00:10:00
+#SBATCH --time=01:00:00
 #SBATCH --partition=compute_full_node
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -14,7 +14,7 @@ source /home/guibo/ebo-seg/bin/activate
 
 set -euo pipefail
 
-DATASET="${DATASET:-acdc}"
+DATASET="${DATASET:-brats}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 case "$DATASET_LOWER" in
@@ -57,8 +57,8 @@ if [ "$DATASET_LOWER" = "acdc" ]; then
     DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/acdc/baseline_ce_dice/best_ce_dice.pt"
     DEFAULT_OUTPUT_DIR="/home/guibo/links/scratch/inference/acdc/inference_3boundlogebo_10_5_outin5_cenin2"
 else
-    DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/brats/hybridebo_17_5_2in/best_hybrid_ebo_ce.pt"
-    DEFAULT_OUTPUT_DIR="/home/guibo/links/scratch/inference/brats/inference_hybridebo_ce_17_5_2in"
+    DEFAULT_CHECKPOINT="/home/guibo/links/scratch/models/ebo_seg/brats/ce_dice_baseline/best_ce_dice.pt"
+    DEFAULT_OUTPUT_DIR="/home/guibo/links/scratch/inference/brats/inference_baseline3"
 fi
 
 CHECKPOINT="${CHECKPOINT:-$DEFAULT_CHECKPOINT}"
@@ -71,8 +71,20 @@ MAX_PIXELS_KDE="${MAX_PIXELS_KDE:-200000}"
 ENERGY_THRESH="${ENERGY_THRESH:--5}"
 MSP_THRESH="${MSP_THRESH:-0.999}"
 MODES="${MODES:-all}"
+# Optional: .npy/.pt produced by compute_d_matrix.sh. Enables the RELU score.
+D_MATRIX="${D_MATRIX:-}"
 
 cd /home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg
+
+d_matrix_args=()
+if [ -n "$D_MATRIX" ]; then
+    if [ ! -f "$D_MATRIX" ]; then
+        echo "ERROR: D matrix not found: $D_MATRIX"
+        echo "Produce it with: DATASET=$DATASET_LOWER SPLIT=val bash compute_d_matrix.sh"
+        exit 1
+    fi
+    d_matrix_args+=(--d-matrix "$D_MATRIX")
+fi
 
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
 echo "Dataset      : ${DATASET_LOWER}"
@@ -82,6 +94,7 @@ echo "Output dir   : ${OUTPUT_DIR}"
 echo "Modes        : ${MODES}"
 echo "Energy thr   : ${ENERGY_THRESH}"
 echo "MSP thr      : ${MSP_THRESH}"
+echo "D matrix     : ${D_MATRIX:-none (RELU score disabled)}"
 
 "${PYTHON_BIN}" inference.py ${MODES} \
   --checkpoint "${CHECKPOINT}" \
@@ -94,4 +107,5 @@ echo "MSP thr      : ${MSP_THRESH}"
   --temperature "${TEMPERATURE}" \
   --max-pixels-kde "${MAX_PIXELS_KDE}" \
   --energy-threshold "${ENERGY_THRESH}" \
-  --msp-threshold "${MSP_THRESH}"
+  --msp-threshold "${MSP_THRESH}" \
+  "${d_matrix_args[@]}"

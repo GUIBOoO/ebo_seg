@@ -14,7 +14,7 @@ source /home/guibo/ebo-seg/bin/activate
 set -euo pipefail
 
 
-DATASET="${DATASET:-acdc}"
+DATASET="${DATASET:-brats}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 case "$DATASET_LOWER" in
@@ -54,9 +54,9 @@ fi
 export PYTHON_DATA_DIR="$DATA_DIR"
 DATASET_ROOT="${DATASET_ROOT:-$DATA_DIR}"
 
-CHECKPOINT=${CHECKPOINT:-"/home/guibo/links/scratch/models/ebo_seg/acdc/baseline_ce_dice/best_ce_dice.pt"}
-DATASET=${DATASET:-"acdc"}
-OUTPUT_DIR=${OUTPUT_DIR:-"/home/guibo/links/scratch/d_matrices"}
+CHECKPOINT=${CHECKPOINT:-"/home/guibo/links/scratch/models/ebo_seg/brats/ce_dice_baseline/best_ce_dice.pt"}
+DATASET=${DATASET:-"brats"}
+OUTPUT_DIR=${OUTPUT_DIR:-"/home/guibo/links/scratch/d_matrices/brats"}
 SPLIT=${SPLIT:-"val"}
 BATCH_SIZE=${BATCH_SIZE:-4}
 DEVICE=${DEVICE:-"cuda"}

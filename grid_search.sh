@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --time=24:00:00
-#SBATCH --array=0-3
+#SBATCH --array=0-23
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --output=/scratch/guibo/slurm_outputs/slurm-%j.out
@@ -15,22 +15,35 @@ source /home/guibo/ebo-seg/bin/activate
 set -euo pipefail
 
 ROOT_DIR="/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg"
-DATASET="${DATASET:-brats}"
+DATASET="${DATASET:-brats3}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
+# DATASET_ARG is what grid_search.py / train_unet.py accept; brats3 uses the same
+# loader as brats, only with 3 channels and contiguous labels (0..3).
 case "$DATASET_LOWER" in
   acdc)
     DATA_DIR="$SLURM_TMPDIR/dataset/ACDC/database"
     DATASET_ZIP="$SCRATCH/datasets/ACDC/ACDC.zip"
     UNZIP_TARGET="$SLURM_TMPDIR/dataset"
+    DATASET_ARG=acdc
     DEFAULT_NUM_CLASSES=4
+    DEFAULT_IN_CHANNELS=1
     ;;
   brats)
     DATA_DIR="$SCRATCH/datasets/Brats/data_slices"
+    DATASET_ARG=brats
     DEFAULT_NUM_CLASSES=5
+    DEFAULT_IN_CHANNELS=4
+    ;;
+  brats3)
+    # Built by extract_data_brats3.py: T1ce/T2/FLAIR, labels remapped to 0..3.
+    DATA_DIR="$SCRATCH/datasets/Brats/data_slices_3ch"
+    DATASET_ARG=brats
+    DEFAULT_NUM_CLASSES=4
+    DEFAULT_IN_CHANNELS=3
     ;;
   *)
-    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc' or 'brats'."
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats' or 'brats3'."
     exit 1
     ;;
 esac
@@ -53,17 +66,25 @@ else
 fi
 
 export PYTHON_DATA_DIR="$DATA_DIR"
-OUTPUT_DIR="${OUTPUT_DIR:-$SCRATCH/grid_search/brats/3boundebo}"
 PYTHON_SCRIPT="${PYTHON_SCRIPT:-grid_search.py}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
-MODEL="${MODEL:-unet}"
-LOSS="${LOSS:-ebo_ce}"
+MODEL="${MODEL:-transunet}"
+MODEL_LOWER=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')
+LOSS="${LOSS:-bound_log_ebo}"
+OUTPUT_DIR="${OUTPUT_DIR:-$SCRATCH/grid_search/$MODEL_LOWER/$DATASET_LOWER/$LOSS}"
 EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 LR="${LR:-1e-3}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 IMAGE_SIZE="${IMAGE_SIZE:-256}"
 NUM_CLASSES="${NUM_CLASSES:-$DEFAULT_NUM_CLASSES}"
+IN_CHANNELS="${IN_CHANNELS:-$DEFAULT_IN_CHANNELS}"
+# TransUNet's R50 stem is ImageNet-21k pretrained; other models ignore this.
+if [ "$MODEL_LOWER" = "transunet" ]; then
+    PRETRAINED_PATH="${PRETRAINED_PATH:-/home/guibo/links/scratch/pretrained/transunet/R50+ViT-B_16.npz}"
+else
+    PRETRAINED_PATH="${PRETRAINED_PATH:-}"
+fi
 SEED="${SEED:-42}"
 DEVICE="${DEVICE:-cuda}"
 METRIC="${METRIC:-fpr95}"
@@ -80,7 +101,7 @@ LAMBDA_EBO_CEN_CORR_GRID="${LAMBDA_EBO_CEN_CORR_GRID:-0.1 }"
 LAMBDA_EBO_OUT_CORR_GRID="${LAMBDA_EBO_OUT_CORR_GRID:-0.1 0.5}"
 BOUNDARY_K_GRID="${BOUNDARY_K_GRID:-3}"
 MARGIN_CORRECT_GRID="${MARGIN_CORRECT_GRID:--17 -20}"
-MARGIN_MISS_GRID="${MARGIN_MISS_GRID:--5 -3}"
+MARGIN_MISS_GRID="${MARGIN_MISS_GRID:--5}"
 BARRIER_T_GRID="${BARRIER_T_GRID:-1.0}"
 BARRIER_T_GROWTH_GRID="${BARRIER_T_GROWTH_GRID:-${BARRIER_T_GROWTH:-1.005}}"
 RHO_GRID="${RHO_GRID:-1.0 0.1 0.5 4}"
@@ -98,6 +119,21 @@ read -r -a barrier_t_values <<< "$BARRIER_T_GRID"
 read -r -a barrier_t_growth_values <<< "$BARRIER_T_GROWTH_GRID"
 read -r -a rho_values <<< "$RHO_GRID"
 
+if [ "$MODEL_LOWER" = "transunet" ] && [ "$DATASET_LOWER" = "brats" ]; then
+    echo "ERROR: TransUNet's pretrained stem takes 3 channels; raw BraTS has 4."
+    echo "Build the 3-channel dataset with extract_data_brats3.py and use DATASET=brats3."
+    exit 1
+fi
+
+pretrained_args=()
+if [ -n "$PRETRAINED_PATH" ]; then
+    if [ ! -f "$PRETRAINED_PATH" ]; then
+        echo "ERROR: pretrained checkpoint not found: $PRETRAINED_PATH"
+        exit 1
+    fi
+    pretrained_args+=(--pretrained-path "$PRETRAINED_PATH")
+fi
+
 gpu_args=(--models-per-gpu "$MODELS_PER_GPU")
 if [ -n "$MAX_PARALLEL" ]; then
     gpu_args+=(--max-parallel "$MAX_PARALLEL")
@@ -109,10 +145,15 @@ fi
 cd "$ROOT_DIR"
 
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
-echo "Dataset        : ${DATASET_LOWER}"
+echo "Dataset        : ${DATASET_LOWER} (--dataset ${DATASET_ARG})"
 echo "Dataset root   : ${DATA_DIR}"
 echo "Output dir     : ${OUTPUT_DIR}"
 echo "Python script  : ${PYTHON_SCRIPT}"
+echo "Model          : ${MODEL}"
+echo "In channels    : ${IN_CHANNELS}"
+echo "Num classes    : ${NUM_CLASSES}"
+echo "Image size     : ${IMAGE_SIZE}"
+echo "Pretrained     : ${PRETRAINED_PATH:-none}"
 echo "Loss           : ${LOSS}"
 echo "Models per GPU : ${MODELS_PER_GPU}"
 if [ -n "$MAX_PARALLEL" ]; then
@@ -125,7 +166,7 @@ fi
 echo "Starting grid search..."
 
 "$PYTHON_BIN" "$PYTHON_SCRIPT" \
-  --dataset "$DATASET_LOWER" \
+  --dataset "$DATASET_ARG" \
   --dataset-root "$DATA_DIR" \
   --output-dir "$OUTPUT_DIR" \
   --model "$MODEL" \
@@ -135,12 +176,14 @@ echo "Starting grid search..."
   --lr "$LR" \
   --num-workers "$NUM_WORKERS" \
   --image-size "$IMAGE_SIZE" \
+  --in-channels "$IN_CHANNELS" \
   --num-classes "$NUM_CLASSES" \
   --seed "$SEED" \
   --device "$DEVICE" \
   --metric "$METRIC" \
   --selection-mode "$SELECTION_MODE" \
   --python-bin "$PYTHON_BIN" \
+  "${pretrained_args[@]}" \
   "${gpu_args[@]}" \
   --lambda-ebo-in-grid "${lambda_ebo_in_values[@]}" \
   --lambda-ebo-corr-grid "${lambda_ebo_corr_values[@]}" \

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=24:00:00
+#SBATCH --time=20:00:00
 #SBATCH --array=0
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -14,11 +14,11 @@ module load python/3.10.13
 source ~/nnunet/bin/activate
 
 ROOT_DIR="${ROOT_DIR:-/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg}"
-DATASET_ID="${DATASET_ID:-1}"
+DATASET_ID="${DATASET_ID:-2}"
 CONFIGURATION="${CONFIGURATION:-2d}"
 FOLD="${FOLD:-0}"
 PLANS="${PLANS:-nnUNetPlans}"
-LOSS="${LOSS:-bound_log_ebo}"
+LOSS="${LOSS:-cedice}"
 CONTINUE="${CONTINUE:-0}"
 DEVICE="${DEVICE:-cuda}"
 NUM_GPUS="${NUM_GPUS:-}"
@@ -27,13 +27,13 @@ NNUNET_FPR95_MAX_PIXELS_PER_BATCH="${NNUNET_FPR95_MAX_PIXELS_PER_BATCH:-50000}"
 
 export nnUNet_raw="${nnUNet_raw:-/scratch/$USER/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-/scratch/$USER/nnUNet_preprocessed}"
-NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search}"
+NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/BraTS}"
 export nnUNet_compile="${nnUNet_compile:-False}"
 export nnUNet_extTrainer="${nnUNet_extTrainer:-$ROOT_DIR/nnunet_ext_trainers}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 export NNUNET_FPR95_MAX_PIXELS
 export NNUNET_FPR95_MAX_PIXELS_PER_BATCH
-SELECT_BEST="${SELECT_BEST:-0}"
+SELECT_BEST="${SELECT_BEST:-1}"
 BEST_OUTPUT_JSON="${BEST_OUTPUT_JSON:-$NNUNET_RESULTS_BASE/nnunet_grid_search_best.json}"
 
 if [ "$SELECT_BEST" = "1" ]; then
@@ -90,12 +90,16 @@ trainer_for_loss() {
         log_ebo) echo "EBOLossLogBarrierTrainer" ;;
         bound_ebo|bound_ebo_ce|bound_ebo_cross_entropy|boundary_ebo_ce) echo "BoundEBOTrainer" ;;
         bound_log_ebo|bound_ebo_log_barrier|boundary_log_ebo) echo "BoundEBOLogBarrierTrainer" ;;
+        cedice|ce_dice) echo "CEDiceTrainer" ;;
         *) echo "ERROR: unsupported nnU-Net EBO loss '$1'" >&2; return 1 ;;
     esac
 }
 
 configs=()
 case "$LOSS" in
+    cedice|ce_dice)
+        configs+=("|||||||||||")
+        ;;
     ebo_ce|ebo_cross_entropy)
         for lin in "${lambda_ebo_in_values[@]}"; do
         for lcorr in "${lambda_ebo_corr_values[@]}"; do
@@ -173,6 +177,8 @@ export nnUNet_results="$NNUNET_RESULTS_BASE/$TRIAL_NAME"
 mkdir -p "$nnUNet_results"
 
 cd "$ROOT_DIR"
+
+python -c "from nnunet_split_utils import sync_split_files_by_id; sync_split_files_by_id($DATASET_ID)"
 
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
 echo "Task           : $TASK_ID / $TOTAL"

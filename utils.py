@@ -197,18 +197,40 @@ def energy(logits, T=1):
     energy =  -T * torch.logsumexp(logits / T, dim=1)
     return energy
 
-def relu_score(softmax):
-    path = os.path.join(os.environ["SCRATCH"],"d_matrices","d_matrix_acdc_val_lambda_0.5.npy",)
-    d = torch.from_numpy(
-        np.load(path)
-    ).to(softmax.device, softmax.dtype)
+def load_d_matrix(path: str | os.PathLike, num_classes: int | None = None) -> torch.Tensor:
+    """Load a RELU D matrix saved by d_matrix.py / d_matrix_nnunet.py (.npy or .pt).
 
-    return torch.einsum(
-        "bchw,cd,bdhw->bhw",
-        softmax,
-        d,
-        softmax,
-    )
+    `num_classes` (the model's number of segmentation heads) is checked against
+    the matrix shape: a D computed on one dataset cannot be reused on another
+    with a different number of classes.
+    """
+    path = Path(path)
+    if path.suffix == ".pt":
+        d = torch.load(path, map_location="cpu", weights_only=True)
+    else:
+        d = torch.from_numpy(np.load(path))
+    d = d.float()
+
+    if d.ndim != 2 or d.shape[0] != d.shape[1]:
+        raise ValueError(f"D matrix must be square, got shape {tuple(d.shape)} from {path}")
+    if num_classes is not None and d.shape[0] != num_classes:
+        raise ValueError(
+            f"D matrix from {path} has {d.shape[0]} classes but the model has "
+            f"{num_classes}. Recompute D for this model/dataset."
+        )
+    return d
+
+
+def relu_score(softmax: torch.Tensor, d_matrix: torch.Tensor) -> torch.Tensor:
+    """RELU score: p^T D p per pixel, for (B, C, *spatial) softmax maps."""
+    num_classes = softmax.shape[1]
+    if d_matrix.shape != (num_classes, num_classes):
+        raise ValueError(
+            f"D matrix shape {tuple(d_matrix.shape)} does not match {num_classes} classes."
+        )
+    d = d_matrix.to(softmax.device, softmax.dtype)
+    probs = softmax.movedim(1, -1)  # (B, *spatial, C)
+    return torch.einsum("...c,cd,...d->...", probs, d, probs)
 
 
 def compute_boundary_mask(

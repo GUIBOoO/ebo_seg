@@ -21,10 +21,15 @@ from metrics import (
     compute_multiclass_metrics_from_preds,
 )
 from models import build_model_acdc, build_model_brats
-from utils import SIRC, doctor, energy, hybrid_energy, relu_score
+from utils import SIRC, doctor, energy, hybrid_energy, load_d_matrix, relu_score
 
 
-SCORE_NAMES = ("msp", "alpha", "beta", "energy", "hybrid_energy", "sirc")
+BASE_SCORE_NAMES = ("msp", "alpha", "beta", "energy", "hybrid_energy", "sirc")
+
+
+def resolve_score_names(d_matrix: torch.Tensor | None) -> Tuple[str, ...]:
+    """RELU needs a precomputed D matrix, so it is only scored when one is given."""
+    return BASE_SCORE_NAMES + (("relu",) if d_matrix is not None else ())
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -67,6 +72,13 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--max-pixels-kde", type=int, default=200000)
     parser.add_argument("--energy-threshold", type=float, default=-25.0)
     parser.add_argument("--msp-threshold", type=float, default=0.9)
+    parser.add_argument(
+        "--d-matrix",
+        type=Path,
+        default=None,
+        help="D matrix (.npy/.pt) from d_matrix.py. Enables the RELU score. "
+        "Estimate it on the val split, then report on the test split.",
+    )
     return parser
 
 
@@ -100,6 +112,7 @@ def _compute_score_maps(
     logits: torch.Tensor,
     images: torch.Tensor,
     temperature: float,
+    d_matrix: torch.Tensor | None = None,
 ) -> Dict[str, torch.Tensor]:
     softmax = torch.softmax(logits, dim=1)
     msp = torch.max(softmax, dim=1).values
@@ -107,17 +120,25 @@ def _compute_score_maps(
     energy_map = energy(logits, temperature)
     hybrid_energy_map = hybrid_energy(logits, images, T=temperature)
     sirc = SIRC(msp, 1, energy_map, b=1, a=1)
-    # relu = relu_score(softmax)
 
-    return {
+    scores = {
         "msp": -msp,
         "alpha": alpha,
         "beta": beta,
         "energy": energy_map,
         "hybrid_energy": hybrid_energy_map,
         "sirc": -sirc,
-        # "relu": relu,
     }
+    if d_matrix is not None:
+        # d_matrix.py builds a 2x2 matrix for binary models (stacking 1-p, p),
+        # while softmax over a single logit channel is degenerate (all ones).
+        if logits.shape[1] == 1:
+            foreground = torch.sigmoid(logits[:, 0])
+            relu_probs = torch.stack((1.0 - foreground, foreground), dim=1)
+        else:
+            relu_probs = softmax
+        scores["relu"] = relu_score(relu_probs, d_matrix)
+    return scores
 
 def _compute_detection_metrics(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float | None]:
     if labels.size == 0 or np.unique(labels).size < 2:
@@ -152,11 +173,14 @@ def load_checkpoint_model(
     train_args = checkpoint.get("args", {})
     model_name = train_args.get("model", "unet")
     num_classes = int(train_args.get("num_classes", 1))
+    # img_size must match training: it fixes TransUNet's position-embedding grid.
+    img_size = int(train_args.get("image_size", 256))
+    in_channels = int(train_args.get("in_channels", 4))
 
     if dataset_name == "acdc":
-        model = build_model_acdc(model_name, num_classes)
+        model = build_model_acdc(model_name, num_classes, img_size=img_size)
     else:
-        model = build_model_brats(model_name, num_classes)
+        model = build_model_brats(model_name, num_classes, img_size=img_size, in_channels=in_channels)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device).eval()
     return model, train_args
@@ -171,6 +195,7 @@ def evaluate(
     temperature: float,
     energy_threshold: float,
     msp_threshold: float,
+    d_matrix: torch.Tensor | None = None,
 ) -> Tuple[dict, Dict[str, np.ndarray], List[dict]]:
     total_dice = 0.0
     total_iou = 0.0
@@ -178,7 +203,7 @@ def evaluate(
     num_batches = 0
 
     error_labels: List[np.ndarray] = []
-    score_values = {name: [] for name in SCORE_NAMES}
+    score_values = {name: [] for name in resolve_score_names(d_matrix)}
     per_sample: List[dict] = []
     energy_filtered_preds: List[torch.Tensor] = []
     energy_filtered_targets: List[torch.Tensor] = []
@@ -200,7 +225,7 @@ def evaluate(
             else:
                 dice, iou, pixel_acc = compute_multiclass_metrics(logits, masks, num_classes)
 
-            scores = _compute_score_maps(logits, images, temperature)
+            scores = _compute_score_maps(logits, images, temperature, d_matrix)
             for name, tensor in scores.items():
                 arr = tensor.detach().cpu().numpy()
                 if not np.isfinite(arr).all():
@@ -312,10 +337,14 @@ def evaluate(
 
 
 
+def _present_score_names(score_arrays: Dict[str, np.ndarray]) -> Tuple[str, ...]:
+    return tuple(name for name in (*BASE_SCORE_NAMES, "relu") if name in score_arrays)
+
+
 def save_metrics(segmentation_metrics: dict, score_arrays: Dict[str, np.ndarray], output_dir: Path) -> None:
     detection_metrics = {
         name: _compute_detection_metrics(score_arrays["labels"], score_arrays[name])
-        for name in SCORE_NAMES
+        for name in _present_score_names(score_arrays)
     }
     payload = {
         "segmentation": segmentation_metrics,
@@ -352,7 +381,7 @@ def save_distributions(score_arrays: Dict[str, np.ndarray], output_dir: Path, ma
     distribution_dir.mkdir(parents=True, exist_ok=True)
 
     label_names = np.where(labels[indices] == 1, "error", "correct")
-    for name in SCORE_NAMES:
+    for name in _present_score_names(score_arrays):
         df = pd.DataFrame(
             {
                 "score": score_arrays[name][indices],
@@ -404,7 +433,8 @@ def save_visualizations(
         axes[3].imshow(error, cmap="gray_r")
         axes[3].set_title("Error")
 
-        for axis, score_name in zip(axes[4:10], score_order):
+        available = [name for name in score_order if name in sample["scores"]]
+        for axis, score_name in zip(axes[4:10], available):
             axis.imshow(sample["scores"][score_name].numpy(), cmap="viridis")
             axis.set_title(score_name.upper())
 
@@ -483,14 +513,21 @@ def main() -> None:
     num_classes = int(train_args.get("num_classes", 1))
     model, train_args = load_checkpoint_model(args.checkpoint, device, dataset_name)
 
+    # Binary models get a 2x2 D (background/foreground), see d_matrix.py.
+    matrix_classes = 2 if num_classes == 1 else num_classes
+    d_matrix = load_d_matrix(args.d_matrix, num_classes=matrix_classes).to(device) if args.d_matrix else None
+
     default_output_dir = args.checkpoint.parent / f"inference_{args.checkpoint.stem}"
     output_dir = args.output_dir or default_output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # TransUNet was trained on resized slices; feed it the same geometry.
+    resize_to = int(train_args.get("image_size", 256)) if str(train_args.get("model", "unet")).lower() == "transunet" else None
     _, _, test_loader = get_dataloaders(
         dataset=dataset_name,
         base_dir=str(dataset_root),
         batch_size=args.batch_size,
+        image_size=resize_to,
     )
 
     segmentation_metrics, score_arrays, per_sample = evaluate(
@@ -501,6 +538,7 @@ def main() -> None:
         temperature=args.temperature,
         energy_threshold=args.energy_threshold,
         msp_threshold=args.msp_threshold,
+        d_matrix=d_matrix,
     )
 
     run_metadata = {

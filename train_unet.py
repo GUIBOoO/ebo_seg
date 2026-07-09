@@ -306,12 +306,21 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument('--dataset-root', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--model', type=str, default='unet')
+    parser.add_argument(
+        '--pretrained-path', type=Path, default=None,
+        help='Path to a pretrained encoder checkpoint (e.g. R50+ViT-B_16.npz for --model transunet).',
+    )
     parser.add_argument('--loss', type=str, default='ce_dice')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch-size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--image-size', type=int, default=256)
+    parser.add_argument(
+        '--in-channels', type=int, default=4,
+        help='BraTS input channels: 4 for extract_data.py, 3 (T1ce/T2/FLAIR) for '
+             'extract_data_brats3.py. Ignored for ACDC, which is always 1.',
+    )
     parser.add_argument('--num-classes', type=int, default=1)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', type=str, default='cuda')
@@ -348,16 +357,24 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     dataset_name = infer_dataset_type(base_dir=args.dataset_root, dataset=args.dataset)
 
+    resize_to = args.image_size if args.model.lower() == 'transunet' else None
     train_loader, val_loader, _ = get_dataloaders(
         dataset=dataset_name,
         base_dir=str(args.dataset_root),
         batch_size=args.batch_size,
+        image_size=resize_to,
     )
 
+    pretrained_path = str(args.pretrained_path) if args.pretrained_path else None
     if dataset_name == 'acdc':
-        model = build_model_acdc(args.model, args.num_classes).to(device)
+        model = build_model_acdc(
+            args.model, args.num_classes, img_size=args.image_size, pretrained_path=pretrained_path,
+        ).to(device)
     else:
-        model = build_model_brats(args.model, args.num_classes).to(device)
+        model = build_model_brats(
+            args.model, args.num_classes, img_size=args.image_size, pretrained_path=pretrained_path,
+            in_channels=args.in_channels,
+        ).to(device)
     criterion = build_loss(
         args.loss,
         args.num_classes,
@@ -384,6 +401,8 @@ def main() -> None:
     print(f'Device: {device}')
     print(f'Dataset: {dataset_name}')
     print(f'Model: {args.model}')
+    if dataset_name != 'acdc':
+        print(f'Input channels: {args.in_channels}')
     print(f'Loss: {args.loss}')
     print(f'Track loss gradients: {args.track_loss_gradients}')
     print(

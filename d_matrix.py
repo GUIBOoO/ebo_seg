@@ -1,13 +1,11 @@
 import argparse
-import json
-import math
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 import tqdm
 
+from d_matrix_core import DMatrixAccumulator, save_d_matrix
 from datasets import get_dataloaders, infer_dataset_type
 from models import build_model_acdc, build_model_brats
 
@@ -41,11 +39,16 @@ def _load_checkpoint_model(
     train_args = checkpoint.get("args", {})
     resolved_model_name = model_name or train_args.get("model", "unet")
     resolved_num_classes = int(num_classes if num_classes is not None else train_args.get("num_classes", 1))
+    # img_size fixes TransUNet's position-embedding grid, so it must match training.
+    img_size = int(train_args.get("image_size", 256))
+    in_channels = int(train_args.get("in_channels", 4))
 
     if dataset_name == "acdc":
-        model = build_model_acdc(resolved_model_name, resolved_num_classes)
+        model = build_model_acdc(resolved_model_name, resolved_num_classes, img_size=img_size)
     else:
-        model = build_model_brats(resolved_model_name, resolved_num_classes)
+        model = build_model_brats(
+            resolved_model_name, resolved_num_classes, img_size=img_size, in_channels=in_channels
+        )
 
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     model.load_state_dict(state_dict)
@@ -57,6 +60,7 @@ def _load_checkpoint_model(
     return model, train_args
 
 
+
 def compute_d_matrix(
     loader,
     model: torch.nn.Module,
@@ -65,14 +69,8 @@ def compute_d_matrix(
     lambda_weight: float = 0.5,
     eps: float = 1e-12,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    if not 0.0 <= lambda_weight <= 1.0:
-        raise ValueError(f"lambda_weight must be in [0, 1], got {lambda_weight}")
-
     matrix_classes = 2 if num_classes == 1 else num_classes
-    incorrect_sum = torch.zeros((matrix_classes, matrix_classes), dtype=torch.float64, device=device)
-    correct_sum = torch.zeros_like(incorrect_sum)
-    incorrect_count = 0
-    correct_count = 0
+    accumulator = DMatrixAccumulator(matrix_classes, device)
 
     model_was_training = model.training
     model.eval()
@@ -84,51 +82,12 @@ def compute_d_matrix(
 
             logits = model(images)
             probs, preds = _prediction_probabilities(logits, num_classes)
-
-            correct_mask = preds == targets
-            incorrect_mask = ~correct_mask
-
-            probs_flat = probs.permute(0, 2, 3, 1).reshape(-1, matrix_classes).double()
-            correct_flat = correct_mask.reshape(-1)
-            incorrect_flat = incorrect_mask.reshape(-1)
-
-            if incorrect_flat.any():
-                p_miss = probs_flat[incorrect_flat]
-                incorrect_sum += p_miss.T @ p_miss
-                incorrect_count += int(p_miss.shape[0])
-
-            if correct_flat.any():
-                p_corr = probs_flat[correct_flat]
-                correct_sum += p_corr.T @ p_corr
-                correct_count += int(p_corr.shape[0])
+            accumulator.update(probs, preds == targets)
 
     if model_was_training:
         model.train()
 
-    incorrect_mean = incorrect_sum / max(incorrect_count, 1)
-    correct_mean = correct_sum / max(correct_count, 1)
-
-    d_star = torch.relu(lambda_weight * incorrect_mean - (1.0 - lambda_weight) * correct_mean)
-    d_star.fill_diagonal_(0.0)
-
-    frobenius_sq = torch.sum(d_star * d_star)
-    if frobenius_sq > eps:
-        d_matrix = d_star * math.sqrt(matrix_classes / float(frobenius_sq.item()))
-    else:
-        d_matrix = d_star.clone()
-
-    stats = {
-        "lambda_weight": float(lambda_weight),
-        "num_classes": int(num_classes),
-        "matrix_classes": int(matrix_classes),
-        "num_correct_pixels": int(correct_count),
-        "num_incorrect_pixels": int(incorrect_count),
-        "trace_ddt": float(torch.sum(d_matrix * d_matrix).detach().cpu().item()),
-        "unnormalized_trace_ddt": float(frobenius_sq.detach().cpu().item()),
-        "has_incorrect_pixels": bool(incorrect_count > 0),
-        "has_correct_pixels": bool(correct_count > 0),
-    }
-    return d_matrix.float().cpu(), stats
+    return accumulator.finalize(num_classes=num_classes, lambda_weight=lambda_weight, eps=eps)
 
 
 def _select_split(loaders: tuple, split: str):
@@ -200,15 +159,7 @@ def main() -> None:
         lambda_weight=args.lambda_weight,
     )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     stem = f"d_matrix_{dataset_name}_{args.split}_lambda_{args.lambda_weight:g}"
-    torch_path = args.output_dir / f"{stem}.pt"
-    npy_path = args.output_dir / f"{stem}.npy"
-    json_path = args.output_dir / f"{stem}.json"
-
-    torch.save(d_matrix, torch_path)
-    np.save(npy_path, d_matrix.numpy())
-
     metadata = {
         **stats,
         "dataset": dataset_name,
@@ -216,11 +167,8 @@ def main() -> None:
         "checkpoint": str(args.checkpoint),
         "dataset_root": str(args.dataset_root),
         "model": train_args.get("model", args.model or "unet"),
-        "output_pt": str(torch_path),
-        "output_npy": str(npy_path),
     }
-    with json_path.open("w", encoding="utf-8") as file_obj:
-        json.dump(metadata, file_obj, indent=2)
+    torch_path, npy_path, json_path = save_d_matrix(args.output_dir, stem, d_matrix, metadata)
 
     print("D matrix:")
     print(d_matrix)

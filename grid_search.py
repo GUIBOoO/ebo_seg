@@ -16,12 +16,20 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument('--dataset-root', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--model', type=str, default='unet')
+    parser.add_argument(
+        '--pretrained-path', type=Path, default=None,
+        help='Pretrained encoder checkpoint forwarded to train_unet.py (e.g. R50+ViT-B_16.npz for transunet).',
+    )
     parser.add_argument('--loss', type=str, default='ebo_ce')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch-size', type=int, default=8)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--image-size', type=int, default=256)
+    parser.add_argument(
+        '--in-channels', type=int, default=4,
+        help='BraTS input channels: 4 (extract_data.py) or 3 (extract_data_brats3.py). Ignored for ACDC.',
+    )
     parser.add_argument('--num-classes', type=int, default=4)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', type=str, default='cuda')
@@ -259,12 +267,16 @@ def main() -> None:
             '--lr', str(args.lr),
             '--num-workers', str(args.num_workers),
             '--image-size', str(args.image_size),
+            '--in-channels', str(args.in_channels),
             '--num-classes', str(args.num_classes),
             '--seed', str(args.seed),
             '--device', args.device,
             '--margin-correct', str(margin_correct),
             '--margin-miss', str(margin_miss),
         ]
+
+        if args.pretrained_path is not None:
+            command.extend(['--pretrained-path', str(args.pretrained_path)])
 
         if is_standard_ebo_loss(args.loss):
             lambda_ebo_in = config['lambda_ebo_in']

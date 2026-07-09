@@ -46,6 +46,8 @@ echo "Loss: $LOSS"
 echo "Fold: $FOLD"
 echo "nnUNet_extTrainer: $nnUNet_extTrainer"
 
+python -c "from nnunet_split_utils import sync_split_files_by_id; sync_split_files_by_id($DATASET_ID)"
+
 nnUNetv2_train \
 "$DATASET_ID" \
 "$CONFIGURATION" \

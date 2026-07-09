@@ -5,7 +5,7 @@ from typing import List, Sequence, Tuple, Dict
 import nibabel as nib
 import numpy as np
 from monai.data import DataLoader, Dataset, pad_list_data_collate
-from monai.transforms import Compose, MapTransform, ScaleIntensityd, ToTensord
+from monai.transforms import Compose, MapTransform, Resized, ScaleIntensityd, ToTensord
 from sklearn.model_selection import train_test_split
 
 DEFAULT_BASE_DIR = os.environ.get("PYTHON_DATA_DIR")
@@ -46,16 +46,21 @@ class LoadSlicedACDC(MapTransform):
 
 
 class LoadSlicedBraTS(MapTransform):
-    """Load a single 2D BraTS slice prepared by extract_data.py."""
+    """Load a single 2D BraTS slice prepared by extract_data.py (4 channels)
+    or extract_data_brats3.py (3 channels).
+
+    The label gets a leading channel axis so downstream channel-first
+    transforms (e.g. Resized) see (1, H, W) like the ACDC loader; train_unet.py
+    squeezes it back out.
+    """
 
     def __call__(self, data):
         img = _load_array(data["image"])
         lbl = _load_array(data["label"])
-        #lbl = (lbl > 0).astype(np.float32)[None, ...]
 
         return {
             "image": img.astype(np.float32),
-            "label": lbl,
+            "label": lbl[None, ...].astype(np.float32),
         }
 
 
@@ -185,7 +190,7 @@ def _split_randomly(
 
     return train_patients, val_patients, test_patients
 
-def get_transforms(dataset: str) -> Tuple[Compose, Compose]:
+def get_transforms(dataset: str, image_size: int | None = None) -> Tuple[Compose, Compose]:
     dataset = dataset.lower()
     if dataset == "acdc":
         loader = LoadSlicedACDC(keys=["image", "label"])
@@ -194,13 +199,18 @@ def get_transforms(dataset: str) -> Tuple[Compose, Compose]:
     else:
         raise ValueError(f"Unsupported dataset `{dataset}`. Expected `acdc` or `brats`.")
 
-    transforms = Compose(
-        [
-            loader,
-            ScaleIntensityd(keys=["image"]),
-            ToTensord(keys=["image", "label"]),
-        ]
-    )
+    steps = [loader, ScaleIntensityd(keys=["image"])]
+    if image_size is not None:
+        steps.append(
+            Resized(
+                keys=["image", "label"],
+                spatial_size=(image_size, image_size),
+                mode=("bilinear", "nearest"),
+            )
+        )
+    steps.append(ToTensord(keys=["image", "label"]))
+
+    transforms = Compose(steps)
     return transforms, transforms
 
 
@@ -209,6 +219,7 @@ def get_acdc_dataloaders(
     batch_size: int = 4,
     val_size: float = 0.2,
     random_state: int = 42,
+    image_size: int | None = None,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     root = _resolve_base_dir(base_dir)
     train_root, test_root = _resolve_acdc_split_dirs(root)
@@ -217,7 +228,7 @@ def get_acdc_dataloaders(
     test_data = get_acdc_slices(test_root)
     train_data_split, val_data_split = train_test_split(train_data, test_size=val_size, random_state=random_state)
 
-    train_transforms, val_transforms = get_transforms("acdc")
+    train_transforms, val_transforms = get_transforms("acdc", image_size=image_size)
     train_ds = Dataset(train_data_split, transform=train_transforms)
     val_ds = Dataset(val_data_split, transform=val_transforms)
     test_ds = Dataset(test_data, transform=val_transforms)
@@ -234,6 +245,7 @@ def get_brats_dataloaders(
     test_size: float = 0.1,
     random_state: int = 42,
     foreground_only: bool = True,
+    image_size: int | None = None,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
 
     root = _resolve_base_dir(base_dir)
@@ -252,7 +264,7 @@ def get_brats_dataloaders(
     val_data   = get_brats_slices_from_patients(val_patients, foreground_only)
     test_data  = get_brats_slices_from_patients(test_patients, foreground_only)
 
-    train_transforms, val_transforms = get_transforms("brats")
+    train_transforms, val_transforms = get_transforms("brats", image_size=image_size)
 
     train_ds = Dataset(train_data, transform=train_transforms)
     val_ds   = Dataset(val_data, transform=val_transforms)
@@ -282,6 +294,7 @@ def get_dataloaders(
     test_size: float = 0.1,
     random_state: int = 42,
     foreground_only: bool = True,
+    image_size: int | None = None,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     dataset_name = infer_dataset_type(base_dir=base_dir, dataset=dataset)
     root = _resolve_base_dir(base_dir)
@@ -295,6 +308,7 @@ def get_dataloaders(
             batch_size=batch_size,
             val_size=val_size,
             random_state=random_state,
+            image_size=image_size,
         )
 
     return get_brats_dataloaders(
@@ -303,6 +317,7 @@ def get_dataloaders(
         val_size=val_size,
         random_state=random_state,
         foreground_only=foreground_only,
+        image_size=image_size,
     )
 
 
