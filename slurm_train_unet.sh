@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=02:00:00
+#SBATCH --time=24:00:00
 #SBATCH --partition=compute_full_node
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -74,7 +74,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-/home/guibo/links/scratch/models/ebo_seg/transunet/bra
 PYTHON_BIN="${PYTHON_BIN:-python}"
 MODEL="${MODEL:-transunet}"
 PRETRAINED_PATH="${PRETRAINED_PATH:-/home/guibo/links/scratch/pretrained/transunet/R50+ViT-B_16.npz}"
-EPOCHS="${EPOCHS:-100}"
+EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 LR="${LR:-1e-3}"
 NUM_WORKERS="${NUM_WORKERS:-4}"

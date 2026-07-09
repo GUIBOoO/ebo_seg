@@ -14,23 +14,30 @@ source /home/guibo/ebo-seg/bin/activate
 
 set -euo pipefail
 
-ROOT_DIR="/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg"
-DATASET="${DATASET:-brats}"
+ROOT_DIR="${ROOT_DIR:-/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg}"
+DATASET="${DATASET:-acdc}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
+# DATASET_ARG is what inference.py's --dataset accepts; brats3 is the same
+# loader as brats, only with 3 channels and contiguous labels 0..3.
 case "$DATASET_LOWER" in
   acdc)
     DATA_DIR="$SLURM_TMPDIR/dataset/ACDC/database"
     DATASET_ZIP="$SCRATCH/datasets/ACDC/ACDC.zip"
     UNZIP_TARGET="$SLURM_TMPDIR/dataset"
-    DEFAULT_MODEL_ROOT="/home/guibo/links/scratch/grid_search/1.005log3boundebo1margin"
+    DATASET_ARG=acdc
     ;;
   brats)
     DATA_DIR="$SCRATCH/datasets/Brats/data_slices"
-    DEFAULT_MODEL_ROOT="/home/guibo/links/scratch/grid_search/brats/ebo_ce"
+    DATASET_ARG=brats
+    ;;
+  brats3)
+    # Built by extract_data_brats3.py. The only BraTS variant TransUNet accepts.
+    DATA_DIR="$SCRATCH/datasets/Brats/data_slices_3ch"
+    DATASET_ARG=brats
     ;;
   *)
-    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc' or 'brats'."
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats' or 'brats3'."
     exit 1
     ;;
 esac
@@ -56,10 +63,26 @@ export PYTHON_DATA_DIR="$DATA_DIR"
 DATASET_ROOT="${DATASET_ROOT:-$DATA_DIR}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-MODEL_ROOT="${MODEL_ROOT:-$DEFAULT_MODEL_ROOT}"
+
+# MODEL only picks the default paths. inference.py rebuilds the architecture from
+# the checkpoint's own args (model, image_size, in_channels), so a TransUNet
+# checkpoint is restored with the geometry it was trained on.
+MODEL="${MODEL:-transunet}"
+MODEL_LOWER=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')
+LOSS="${LOSS:-bound_log_ebo}"
+
+if [ "$MODEL_LOWER" = "transunet" ] && [ "$DATASET_LOWER" = "brats" ]; then
+    echo "ERROR: TransUNet's pretrained stem takes 3 channels; raw BraTS has 4."
+    echo "Use DATASET=brats3 (built by extract_data_brats3.py)."
+    exit 1
+fi
+
+MODEL_ROOT="${MODEL_ROOT:-$SCRATCH/grid_search/$MODEL_LOWER/$DATASET_LOWER/$LOSS}"
 BEST_CONFIG_JSON="${BEST_CONFIG_JSON:-$MODEL_ROOT/grid_search_best.json}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/home/guibo/links/scratch/inference/brats/grid_search_ebo}"
-CHECKPOINT_NAME="${CHECKPOINT_NAME:-best_ebo_ce.pt}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRATCH/inference/$MODEL_LOWER/$DATASET_LOWER/grid_search_$LOSS}"
+
+LOSS_NORM=$(PYTHONPATH="$ROOT_DIR" "$PYTHON_BIN" -c 'import sys; from losses import normalize_loss_name; print(normalize_loss_name(sys.argv[1]))' "$LOSS")
+CHECKPOINT_NAME="${CHECKPOINT_NAME:-best_${LOSS_NORM}.pt}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 DEVICE="${DEVICE:-cuda}"
 NUM_SAMPLES="${NUM_SAMPLES:-4}"
@@ -71,8 +94,11 @@ MODES="${MODES:-all}"
 TRIAL_FILTER="${TRIAL_FILTER:-}"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 
+D_MATRIX="${D_MATRIX:-}"
+
 if [ ! -d "$MODEL_ROOT" ]; then
     echo "ERROR: model root not found: $MODEL_ROOT"
+    echo "Set MODEL_ROOT, or check MODEL=$MODEL_LOWER DATASET=$DATASET_LOWER LOSS=$LOSS"
     exit 1
 fi
 
@@ -80,15 +106,28 @@ mkdir -p "$OUTPUT_ROOT"
 
 cd "$ROOT_DIR"
 
+d_matrix_args=()
+if [ -n "$D_MATRIX" ]; then
+    if [ ! -f "$D_MATRIX" ]; then
+        echo "ERROR: D matrix not found: $D_MATRIX"
+        echo "Produce it for this trial's checkpoint with compute_d_matrix.sh (SPLIT=val)."
+        exit 1
+    fi
+    d_matrix_args+=(--d-matrix "$D_MATRIX")
+fi
+
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
-echo "Dataset        : ${DATASET_LOWER}"
+echo "Dataset        : ${DATASET_LOWER} (--dataset ${DATASET_ARG})"
 echo "Dataset root   : ${DATASET_ROOT}"
+echo "Model          : ${MODEL_LOWER} (architecture read from checkpoint)"
+echo "Loss           : ${LOSS}"
 echo "Model root     : ${MODEL_ROOT}"
 echo "Best config    : ${BEST_CONFIG_JSON}"
 echo "Output root    : ${OUTPUT_ROOT}"
 echo "Checkpoint name: ${CHECKPOINT_NAME}"
 echo "Modes          : ${MODES}"
 echo "Trial filter   : ${TRIAL_FILTER:-<none>}"
+echo "D matrix       : ${D_MATRIX:-none (RELU score disabled)}"
 
 if [ ! -f "$BEST_CONFIG_JSON" ]; then
     echo "ERROR: best config JSON not found: $BEST_CONFIG_JSON"
@@ -144,7 +183,7 @@ echo "============================================================"
 
 "$PYTHON_BIN" inference.py ${MODES} \
   --checkpoint "$checkpoint_path" \
-  --dataset "$DATASET_LOWER" \
+  --dataset "$DATASET_ARG" \
   --dataset-root "$DATASET_ROOT" \
   --output-dir "$output_dir" \
   --batch-size "$BATCH_SIZE" \
@@ -153,7 +192,8 @@ echo "============================================================"
   --temperature "$TEMPERATURE" \
   --max-pixels-kde "$MAX_PIXELS_KDE" \
   --energy-threshold "$ENERGY_THRESH" \
-  --msp-threshold "$MSP_THRESH"
+  --msp-threshold "$MSP_THRESH" \
+  "${d_matrix_args[@]}"
 
 echo
 echo "Finished best-config inference."

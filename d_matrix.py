@@ -132,6 +132,11 @@ def main() -> None:
     )
     num_classes = int(args.num_classes if args.num_classes is not None else checkpoint_args.get("num_classes", 1))
 
+    # TransUNet was trained on resized slices and its position-embedding grid is
+    # fixed by img_size; feed it the same geometry it saw during training.
+    model_name = str(args.model or checkpoint_args.get("model", "unet")).lower()
+    resize_to = int(checkpoint_args.get("image_size", 256)) if model_name == "transunet" else None
+
     loaders = get_dataloaders(
         dataset=dataset_name,
         base_dir=args.dataset_root,
@@ -140,6 +145,7 @@ def main() -> None:
         test_size=args.test_size,
         random_state=args.seed,
         foreground_only=args.foreground_only,
+        image_size=resize_to,
     )
     loader = _select_split(loaders, args.split)
 
