@@ -19,6 +19,7 @@ from metrics import (
     compute_binary_metrics_from_preds,
     compute_multiclass_metrics,
     compute_multiclass_metrics_from_preds,
+    hausdorff_distance_95_from_preds,
 )
 from models import build_model_acdc, build_model_brats
 from utils import SIRC, doctor, energy, hybrid_energy, load_d_matrix, relu_score
@@ -202,6 +203,17 @@ def evaluate(
     total_acc = 0.0
     num_batches = 0
 
+    total_hd95 = 0.0
+    num_hd95_batches = 0
+    num_hd95_defined = 0
+    num_hd95_undefined = 0
+
+    # Dice restricted to the pixels the energy detector calls correct, averaged
+    # per batch so it is directly comparable to `dice` above. The pooled variant
+    # over the whole test set lives in the energy_below_threshold block.
+    total_identified_correct_dice = 0.0
+    num_identified_correct_batches = 0
+
     error_labels: List[np.ndarray] = []
     score_values = {name: [] for name in resolve_score_names(d_matrix)}
     per_sample: List[dict] = []
@@ -225,6 +237,15 @@ def evaluate(
             else:
                 dice, iou, pixel_acc = compute_multiclass_metrics(logits, masks, num_classes)
 
+            batch_hd95, hd95_defined, hd95_undefined = hausdorff_distance_95_from_preds(
+                preds, masks, num_classes
+            )
+            num_hd95_defined += hd95_defined
+            num_hd95_undefined += hd95_undefined
+            if not np.isnan(batch_hd95):
+                total_hd95 += batch_hd95
+                num_hd95_batches += 1
+
             scores = _compute_score_maps(logits, images, temperature, d_matrix)
             for name, tensor in scores.items():
                 arr = tensor.detach().cpu().numpy()
@@ -238,8 +259,24 @@ def evaluate(
             num_energy_selected_pixels += energy_selected
 
             if energy_selected > 0:
-                energy_filtered_preds.append(preds[energy_mask].detach().cpu())
-                energy_filtered_targets.append(masks[energy_mask].detach().cpu())
+                selected_batch_preds = preds[energy_mask].detach().cpu()
+                selected_batch_targets = masks[energy_mask].detach().cpu()
+                energy_filtered_preds.append(selected_batch_preds)
+                energy_filtered_targets.append(selected_batch_targets)
+
+                if num_classes == 1:
+                    identified_correct_dice, _, _ = compute_binary_metrics_from_preds(
+                        selected_batch_preds,
+                        selected_batch_targets,
+                    )
+                else:
+                    identified_correct_dice, _, _ = compute_multiclass_metrics_from_preds(
+                        selected_batch_preds,
+                        selected_batch_targets,
+                        num_classes,
+                    )
+                total_identified_correct_dice += identified_correct_dice
+                num_identified_correct_batches += 1
 
             msp_mask = (-scores["msp"]) > msp_threshold
             msp_selected = int(msp_mask.sum().item())
@@ -276,6 +313,18 @@ def evaluate(
         "dice": total_dice / max(num_batches, 1),
         "iou": total_iou / max(num_batches, 1),
         "pixel_acc": total_acc / max(num_batches, 1),
+        # Pixels, foreground classes only, (slice, class) pairs where the class
+        # is absent from the prediction or the ground truth are skipped.
+        "hd95": total_hd95 / num_hd95_batches if num_hd95_batches > 0 else float("nan"),
+        "hd95_num_defined_pairs": num_hd95_defined,
+        "hd95_num_undefined_pairs": num_hd95_undefined,
+        # Dice over the pixels the energy detector identifies as correct.
+        "dice_identified_correct": (
+            total_identified_correct_dice / num_identified_correct_batches
+            if num_identified_correct_batches > 0
+            else float("nan")
+        ),
+        "dice_identified_correct_threshold": energy_threshold,
     }
 
     if num_energy_selected_pixels > 0:

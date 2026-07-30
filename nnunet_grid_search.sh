@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=20:00:00
+#SBATCH --time=00:05:00
 #SBATCH --array=0
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -14,11 +14,11 @@ module load python/3.10.13
 source ~/nnunet/bin/activate
 
 ROOT_DIR="${ROOT_DIR:-/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg}"
-DATASET_ID="${DATASET_ID:-2}"
+DATASET_ID="${DATASET_ID:-1}"
 CONFIGURATION="${CONFIGURATION:-2d}"
 FOLD="${FOLD:-0}"
 PLANS="${PLANS:-nnUNetPlans}"
-LOSS="${LOSS:-cedice}"
+LOSS="${LOSS:-bound_ebo}"
 CONTINUE="${CONTINUE:-0}"
 DEVICE="${DEVICE:-cuda}"
 NUM_GPUS="${NUM_GPUS:-}"
@@ -27,7 +27,7 @@ NNUNET_FPR95_MAX_PIXELS_PER_BATCH="${NNUNET_FPR95_MAX_PIXELS_PER_BATCH:-50000}"
 
 export nnUNet_raw="${nnUNet_raw:-/scratch/$USER/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-/scratch/$USER/nnUNet_preprocessed}"
-NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/BraTS}"
+NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/boundebo/acdc}"
 export nnUNet_compile="${nnUNet_compile:-False}"
 export nnUNet_extTrainer="${nnUNet_extTrainer:-$ROOT_DIR/nnunet_ext_trainers}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
@@ -58,7 +58,7 @@ LAMBDA_EBO_CEN_CORR_GRID="${LAMBDA_EBO_CEN_CORR_GRID:-0.1}"
 LAMBDA_EBO_OUT_CORR_GRID="${LAMBDA_EBO_OUT_CORR_GRID:-0.1 0.5}"
 BOUNDARY_K_GRID="${BOUNDARY_K_GRID:-3}"
 MARGIN_CORRECT_GRID="${MARGIN_CORRECT_GRID:--17 -20}"
-MARGIN_MISS_GRID="${MARGIN_MISS_GRID:--5 -3}"
+MARGIN_MISS_GRID="${MARGIN_MISS_GRID:--5}"
 BARRIER_T_GRID="${BARRIER_T_GRID:-1.0}"
 BARRIER_T_GROWTH_GRID="${BARRIER_T_GROWTH_GRID:-${BARRIER_T_GROWTH:-1.005}}"
 RHO_GRID="${RHO_GRID:-1.0 0.1 0.5 4}"

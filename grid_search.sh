@@ -70,7 +70,7 @@ PYTHON_SCRIPT="${PYTHON_SCRIPT:-grid_search.py}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 MODEL="${MODEL:-transunet}"
 MODEL_LOWER=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')
-LOSS="${LOSS:-bound_log_ebo}"
+LOSS="${LOSS:-bound_ebo_ce}"
 OUTPUT_DIR="${OUTPUT_DIR:-$SCRATCH/grid_search/$MODEL_LOWER/$DATASET_LOWER/$LOSS}"
 EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
@@ -79,7 +79,6 @@ NUM_WORKERS="${NUM_WORKERS:-8}"
 IMAGE_SIZE="${IMAGE_SIZE:-256}"
 NUM_CLASSES="${NUM_CLASSES:-$DEFAULT_NUM_CLASSES}"
 IN_CHANNELS="${IN_CHANNELS:-$DEFAULT_IN_CHANNELS}"
-# TransUNet's R50 stem is ImageNet-21k pretrained; other models ignore this.
 if [ "$MODEL_LOWER" = "transunet" ]; then
     PRETRAINED_PATH="${PRETRAINED_PATH:-/home/guibo/links/scratch/pretrained/transunet/R50+ViT-B_16.npz}"
 else
@@ -89,6 +88,9 @@ SEED="${SEED:-42}"
 DEVICE="${DEVICE:-cuda}"
 METRIC="${METRIC:-fpr95}"
 SELECTION_MODE="${SELECTION_MODE:-best}"
+# Fraction of best-Dice trials kept before minimizing FPR95, for the
+# grid_search_best_dice_top_fpr95.json selection.
+TOP_FRAC="${TOP_FRAC:-0.2}"
 MODELS_PER_GPU="${MODELS_PER_GPU:-3}"
 MAX_PARALLEL="${MAX_PARALLEL:-}"
 GPU_IDS="${GPU_IDS:-}"
@@ -155,6 +157,7 @@ echo "Num classes    : ${NUM_CLASSES}"
 echo "Image size     : ${IMAGE_SIZE}"
 echo "Pretrained     : ${PRETRAINED_PATH:-none}"
 echo "Loss           : ${LOSS}"
+echo "Top frac       : ${TOP_FRAC} (best FPR95 among the top-Dice trials)"
 echo "Models per GPU : ${MODELS_PER_GPU}"
 if [ -n "$MAX_PARALLEL" ]; then
     echo "Max parallel   : ${MAX_PARALLEL}"
@@ -182,6 +185,7 @@ echo "Starting grid search..."
   --device "$DEVICE" \
   --metric "$METRIC" \
   --selection-mode "$SELECTION_MODE" \
+  --top-frac "$TOP_FRAC" \
   --python-bin "$PYTHON_BIN" \
   "${pretrained_args[@]}" \
   "${gpu_args[@]}" \
@@ -199,3 +203,5 @@ echo "Starting grid search..."
   --rho-grid "${rho_values[@]}"
 
 echo "Grid search finished!"
+
+

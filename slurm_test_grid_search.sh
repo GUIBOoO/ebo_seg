@@ -69,7 +69,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 # checkpoint is restored with the geometry it was trained on.
 MODEL="${MODEL:-transunet}"
 MODEL_LOWER=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')
-LOSS="${LOSS:-bound_log_ebo}"
+LOSS="${LOSS:-bound_ebo_ce}"
 
 if [ "$MODEL_LOWER" = "transunet" ] && [ "$DATASET_LOWER" = "brats" ]; then
     echo "ERROR: TransUNet's pretrained stem takes 3 channels; raw BraTS has 4."
@@ -78,11 +78,46 @@ if [ "$MODEL_LOWER" = "transunet" ] && [ "$DATASET_LOWER" = "brats" ]; then
 fi
 
 MODEL_ROOT="${MODEL_ROOT:-$SCRATCH/grid_search/$MODEL_LOWER/$DATASET_LOWER/$LOSS}"
-BEST_CONFIG_JSON="${BEST_CONFIG_JSON:-$MODEL_ROOT/grid_search_best.json}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRATCH/inference/$MODEL_LOWER/$DATASET_LOWER/grid_search_$LOSS}"
 
+# Two independent ways of picking the winner of the grid search, both written by
+# select_grid_best.py:
+#   dice           - best validation Dice.
+#   dice_top_fpr95 - best (lowest) energy FPR95 among the top TOP_FRAC by Dice.
+# SELECTION=both runs the test inference for each of them.
+SELECTION="${SELECTION:-both}"
+TOP_FRAC="${TOP_FRAC:-0.2}"
+# Rebuild the selection JSONs from the trial dirs when they are missing (grid
+# searches run before this selection existed, or an array task that died).
+AUTO_SELECT="${AUTO_SELECT:-1}"
+# Passed to select_grid_best.py: drops trials with a shorter history (still
+# running / crashed). Empty means rank every trial that has a checkpoint.
+EXPECTED_EPOCHS="${EXPECTED_EPOCHS:-}"
+SELECTION_MODE="${SELECTION_MODE:-best}"
+
 LOSS_NORM=$(PYTHONPATH="$ROOT_DIR" "$PYTHON_BIN" -c 'import sys; from losses import normalize_loss_name; print(normalize_loss_name(sys.argv[1]))' "$LOSS")
-CHECKPOINT_NAME="${CHECKPOINT_NAME:-best_${LOSS_NORM}.pt}"
+if [ "$SELECTION_MODE" = "last" ]; then
+    CHECKPOINT_NAME="${CHECKPOINT_NAME:-last_${LOSS_NORM}.pt}"
+else
+    CHECKPOINT_NAME="${CHECKPOINT_NAME:-best_${LOSS_NORM}.pt}"
+fi
+
+case "$SELECTION" in
+  both)  criteria=(dice dice_top_fpr95) ;;
+  dice)  criteria=(dice) ;;
+  dice_top_fpr95) criteria=(dice_top_fpr95) ;;
+  *)
+    echo "ERROR: unsupported SELECTION '$SELECTION'. Expected 'dice', 'dice_top_fpr95' or 'both'."
+    exit 1
+    ;;
+esac
+
+# BEST_CONFIG_JSON only makes sense when a single criterion is requested.
+BEST_CONFIG_JSON="${BEST_CONFIG_JSON:-}"
+if [ -n "$BEST_CONFIG_JSON" ] && [ "${#criteria[@]}" -ne 1 ]; then
+    echo "ERROR: BEST_CONFIG_JSON needs a single criterion. Set SELECTION=dice or SELECTION=dice_top_fpr95."
+    exit 1
+fi
 BATCH_SIZE="${BATCH_SIZE:-4}"
 DEVICE="${DEVICE:-cuda}"
 NUM_SAMPLES="${NUM_SAMPLES:-4}"
@@ -94,7 +129,11 @@ MODES="${MODES:-all}"
 TRIAL_FILTER="${TRIAL_FILTER:-}"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 
+# The D matrix is fitted on one checkpoint, so each selection needs its own.
+# D_MATRIX stays as a fallback for when both selections land on the same trial.
 D_MATRIX="${D_MATRIX:-}"
+D_MATRIX_DICE="${D_MATRIX_DICE:-$D_MATRIX}"
+D_MATRIX_DICE_TOP_FPR95="${D_MATRIX_DICE_TOP_FPR95:-$D_MATRIX}"
 
 if [ ! -d "$MODEL_ROOT" ]; then
     echo "ERROR: model root not found: $MODEL_ROOT"
@@ -106,95 +145,161 @@ mkdir -p "$OUTPUT_ROOT"
 
 cd "$ROOT_DIR"
 
-d_matrix_args=()
-if [ -n "$D_MATRIX" ]; then
-    if [ ! -f "$D_MATRIX" ]; then
-        echo "ERROR: D matrix not found: $D_MATRIX"
-        echo "Produce it for this trial's checkpoint with compute_d_matrix.sh (SPLIT=val)."
-        exit 1
-    fi
-    d_matrix_args+=(--d-matrix "$D_MATRIX")
-fi
-
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
 echo "Dataset        : ${DATASET_LOWER} (--dataset ${DATASET_ARG})"
 echo "Dataset root   : ${DATASET_ROOT}"
 echo "Model          : ${MODEL_LOWER} (architecture read from checkpoint)"
 echo "Loss           : ${LOSS}"
 echo "Model root     : ${MODEL_ROOT}"
-echo "Best config    : ${BEST_CONFIG_JSON}"
 echo "Output root    : ${OUTPUT_ROOT}"
 echo "Checkpoint name: ${CHECKPOINT_NAME}"
+echo "Selections     : ${criteria[*]} (top-frac ${TOP_FRAC})"
 echo "Modes          : ${MODES}"
 echo "Trial filter   : ${TRIAL_FILTER:-<none>}"
-echo "D matrix       : ${D_MATRIX:-none (RELU score disabled)}"
 
-if [ ! -f "$BEST_CONFIG_JSON" ]; then
-    echo "ERROR: best config JSON not found: $BEST_CONFIG_JSON"
-    exit 1
-fi
+# Rebuild both selection JSONs when at least one is missing.
+need_selection=0
+for criterion in "${criteria[@]}"; do
+    if [ -z "$BEST_CONFIG_JSON" ] && [ ! -f "$MODEL_ROOT/grid_search_best_${criterion}.json" ]; then
+        need_selection=1
+    fi
+done
 
-best_trial_dir=$("$PYTHON_BIN" -c 'import json, sys; from pathlib import Path; data = json.loads(Path(sys.argv[1]).read_text()); print(data.get("trial_dir", ""))' "$BEST_CONFIG_JSON")
-
-if [ -z "$best_trial_dir" ]; then
-    echo "ERROR: trial_dir missing in $BEST_CONFIG_JSON"
-    exit 1
-fi
-
-if [ ! -d "$best_trial_dir" ]; then
-    candidate_dir="$MODEL_ROOT/$(basename "$best_trial_dir")"
-    if [ -d "$candidate_dir" ]; then
-        best_trial_dir="$candidate_dir"
-    else
-        echo "ERROR: best trial directory not found: $best_trial_dir"
+if [ "$need_selection" = "1" ]; then
+    if [ "$AUTO_SELECT" != "1" ]; then
+        echo "ERROR: selection JSON missing under $MODEL_ROOT. Run select_grid_best.py, or set AUTO_SELECT=1."
         exit 1
     fi
+    echo
+    echo "Selection JSON missing: running select_grid_best.py on $MODEL_ROOT"
+    expected_epochs_args=()
+    if [ -n "$EXPECTED_EPOCHS" ]; then
+        expected_epochs_args+=(--expected-epochs "$EXPECTED_EPOCHS")
+    fi
+    "$PYTHON_BIN" select_grid_best.py \
+      --results-dir "$MODEL_ROOT" \
+      --loss "$LOSS_NORM" \
+      --selection-mode "$SELECTION_MODE" \
+      --top-frac "$TOP_FRAC" \
+      "${expected_epochs_args[@]}"
 fi
 
-trial_name=$(basename "$best_trial_dir")
+read_json_field() {
+    "$PYTHON_BIN" -c 'import json, sys; from pathlib import Path; print(json.loads(Path(sys.argv[1]).read_text()).get(sys.argv[2], "") or "")' "$1" "$2"
+}
 
-if [ -n "$TRIAL_FILTER" ] && [[ "$trial_name" != *"$TRIAL_FILTER"* ]]; then
-    echo "SKIP: best trial '$trial_name' does not match TRIAL_FILTER='$TRIAL_FILTER'"
-    exit 0
-fi
+# Both selections can land on the same trial; inference then runs once and the
+# second criterion only records a pointer to the shared results.
+declare -A ran_trials=()
+executed=()
 
-checkpoint_path="$best_trial_dir/$CHECKPOINT_NAME"
-if [ ! -f "$checkpoint_path" ]; then
-    echo "ERROR: checkpoint not found at $checkpoint_path"
-    exit 1
-fi
+for criterion in "${criteria[@]}"; do
+    config_json="${BEST_CONFIG_JSON:-$MODEL_ROOT/grid_search_best_${criterion}.json}"
 
-output_dir="$OUTPUT_ROOT/$trial_name"
-metrics_file="$output_dir/metrics.json"
+    echo
+    echo "============================================================"
+    echo "Selection: $criterion"
+    echo "Config   : $config_json"
 
-if [ "$SKIP_EXISTING" = "1" ] && [ -f "$metrics_file" ]; then
-    echo "[SKIP] $trial_name: existing metrics found at $metrics_file"
-    exit 0
-fi
+    if [ ! -f "$config_json" ]; then
+        echo "ERROR: best config JSON not found: $config_json"
+        exit 1
+    fi
 
-mkdir -p "$output_dir"
+    best_trial_dir=$(read_json_field "$config_json" trial_dir)
+    if [ -z "$best_trial_dir" ]; then
+        echo "ERROR: trial_dir missing in $config_json"
+        exit 1
+    fi
 
-echo
-echo "============================================================"
-echo "Running inference for best config: $trial_name"
-echo "Checkpoint: $checkpoint_path"
-echo "Output    : $output_dir"
-echo "============================================================"
+    if [ ! -d "$best_trial_dir" ]; then
+        # Grid search results moved since selection (e.g. copied off $SCRATCH).
+        candidate_dir="$MODEL_ROOT/$(basename "$best_trial_dir")"
+        if [ -d "$candidate_dir" ]; then
+            best_trial_dir="$candidate_dir"
+        else
+            echo "ERROR: best trial directory not found: $best_trial_dir"
+            exit 1
+        fi
+    fi
 
-"$PYTHON_BIN" inference.py ${MODES} \
-  --checkpoint "$checkpoint_path" \
-  --dataset "$DATASET_ARG" \
-  --dataset-root "$DATASET_ROOT" \
-  --output-dir "$output_dir" \
-  --batch-size "$BATCH_SIZE" \
-  --device "$DEVICE" \
-  --num-samples "$NUM_SAMPLES" \
-  --temperature "$TEMPERATURE" \
-  --max-pixels-kde "$MAX_PIXELS_KDE" \
-  --energy-threshold "$ENERGY_THRESH" \
-  --msp-threshold "$MSP_THRESH" \
-  "${d_matrix_args[@]}"
+    trial_name=$(basename "$best_trial_dir")
+    echo "Trial    : $trial_name"
+
+    if [ -n "$TRIAL_FILTER" ] && [[ "$trial_name" != *"$TRIAL_FILTER"* ]]; then
+        echo "SKIP: trial '$trial_name' does not match TRIAL_FILTER='$TRIAL_FILTER'"
+        continue
+    fi
+
+    checkpoint_path=$(read_json_field "$config_json" checkpoint)
+    if [ -z "$checkpoint_path" ] || [ ! -f "$checkpoint_path" ]; then
+        checkpoint_path="$best_trial_dir/$CHECKPOINT_NAME"
+    fi
+    if [ ! -f "$checkpoint_path" ]; then
+        echo "ERROR: checkpoint not found at $checkpoint_path"
+        exit 1
+    fi
+
+    case "$criterion" in
+      dice)           criterion_d_matrix="$D_MATRIX_DICE" ;;
+      dice_top_fpr95) criterion_d_matrix="$D_MATRIX_DICE_TOP_FPR95" ;;
+    esac
+
+    d_matrix_args=()
+    if [ -n "$criterion_d_matrix" ]; then
+        if [ ! -f "$criterion_d_matrix" ]; then
+            echo "ERROR: D matrix not found: $criterion_d_matrix"
+            echo "Produce it for this trial's checkpoint with compute_d_matrix.sh (SPLIT=val)."
+            exit 1
+        fi
+        d_matrix_args+=(--d-matrix "$criterion_d_matrix")
+    fi
+
+    output_dir="$OUTPUT_ROOT/$criterion/$trial_name"
+    mkdir -p "$output_dir"
+
+    cp "$config_json" "$output_dir/selection.json"
+
+    if [ -n "${ran_trials[$trial_name]:-}" ]; then
+        echo "[REUSE] $trial_name already tested for selection '${ran_trials[$trial_name]}'"
+        echo "        results: $OUTPUT_ROOT/${ran_trials[$trial_name]}/$trial_name"
+        executed+=("$criterion -> $trial_name (same model as ${ran_trials[$trial_name]})")
+        continue
+    fi
+
+    metrics_file="$output_dir/metrics.json"
+    if [ "$SKIP_EXISTING" = "1" ] && [ -f "$metrics_file" ]; then
+        echo "[SKIP] $trial_name: existing metrics found at $metrics_file"
+        ran_trials[$trial_name]="$criterion"
+        executed+=("$criterion -> $trial_name (skipped, already tested)")
+        continue
+    fi
+
+    echo "Checkpoint: $checkpoint_path"
+    echo "Output    : $output_dir"
+    echo "D matrix  : ${criterion_d_matrix:-none (RELU score disabled)}"
+    echo "============================================================"
+
+    "$PYTHON_BIN" inference.py ${MODES} \
+      --checkpoint "$checkpoint_path" \
+      --dataset "$DATASET_ARG" \
+      --dataset-root "$DATASET_ROOT" \
+      --output-dir "$output_dir" \
+      --batch-size "$BATCH_SIZE" \
+      --device "$DEVICE" \
+      --num-samples "$NUM_SAMPLES" \
+      --temperature "$TEMPERATURE" \
+      --max-pixels-kde "$MAX_PIXELS_KDE" \
+      --energy-threshold "$ENERGY_THRESH" \
+      --msp-threshold "$MSP_THRESH" \
+      "${d_matrix_args[@]}"
+
+    ran_trials[$trial_name]="$criterion"
+    executed+=("$criterion -> $trial_name")
+done
 
 echo
 echo "Finished best-config inference."
-echo "Trial executed: $trial_name"
+for line in "${executed[@]}"; do
+    echo "  $line"
+done

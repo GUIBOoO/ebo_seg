@@ -97,6 +97,10 @@ BARRIER_T="${BARRIER_T:-1.0}"
 BARRIER_T_GROWTH="${BARRIER_T_GROWTH:-1.005}"
 RHO="${RHO:-1.0}"
 TRACK_LOSS_GRADIENTS="${TRACK_LOSS_GRADIENTS:-0}"
+# Per-epoch energy KDE plots. Off by default: producing them streams every pixel
+# energy back to the CPU each batch (tens of GB of RAM per epoch). Validation
+# FPR95 is reported either way.
+SAVE_DISTRIBUTIONS="${SAVE_DISTRIBUTIONS:-0}"
 
 cd /home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg
 
@@ -116,10 +120,16 @@ echo "Margins      : correct=${MARGIN_CORRECT}, miss=${MARGIN_MISS}"
 echo "Barrier t    : ${BARRIER_T} (growth=${BARRIER_T_GROWTH})"
 echo "AugLag       : rho=${RHO}"
 echo "Track grads  : ${TRACK_LOSS_GRADIENTS}"
+echo "Save distribs: ${SAVE_DISTRIBUTIONS}"
 
 TRACK_LOSS_GRADIENTS_ARGS=()
 if [ "${TRACK_LOSS_GRADIENTS}" = "1" ]; then
   TRACK_LOSS_GRADIENTS_ARGS+=(--track-loss-gradients)
+fi
+
+SAVE_DISTRIBUTIONS_ARGS=()
+if [ "${SAVE_DISTRIBUTIONS}" = "1" ]; then
+  SAVE_DISTRIBUTIONS_ARGS+=(--save-distributions)
 fi
 
 PRETRAINED_PATH_ARGS=()
@@ -157,4 +167,5 @@ echo "About to launch training..."
   --barrier-t-growth "${BARRIER_T_GROWTH}" \
   --rho "${RHO}" \
   "${TRACK_LOSS_GRADIENTS_ARGS[@]}" \
+  "${SAVE_DISTRIBUTIONS_ARGS[@]}" \
   "${PRETRAINED_PATH_ARGS[@]}"

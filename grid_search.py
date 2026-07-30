@@ -8,6 +8,7 @@ import os
 import math
 
 from losses import normalize_loss_name
+from select_grid_best import CRITERIA, write_selections
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -35,6 +36,11 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--metric', choices=['loss', 'dice', 'iou', 'pixel_acc','fpr95'], default='dice')
     parser.add_argument('--selection-mode', choices=['best', 'last'], default='best')
+    parser.add_argument(
+        '--top-frac', type=float, default=0.2,
+        help='Fraction des meilleurs Dice gardee avant de minimiser FPR95 '
+             '(selection grid_search_best_dice_top_fpr95.json).',
+    )
     parser.add_argument('--python-bin', type=str, default=sys.executable)
     parser.add_argument(
         '--gpu-ids',
@@ -53,6 +59,12 @@ def build_argparser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help='Plafond optionnel du nombre total d entrainements lances en parallele.',
+    )
+    parser.add_argument(
+        '--save-distributions',
+        action='store_true',
+        help='Forward --save-distributions to each trial (per-epoch energy KDE plots). Off by '
+             'default: they cost tens of GB of RAM per epoch, per concurrently running trial.',
     )
     parser.add_argument('--lambda-ebo-in-grid', type=float, nargs='+', default=[0.1])
     parser.add_argument('--lambda-ebo-corr-grid', type=float, nargs='+', default=[0.1])
@@ -247,7 +259,13 @@ def main() -> None:
 
     direction = 'minimize' if args.metric in ['loss','fpr95'] else 'maximize'
     script_path = Path(__file__).resolve().parent / 'train_unet.py'
-    results_path = args.output_dir / 'grid_search_results.json'
+    # Every array task shares --output-dir, so each one writes its own shard;
+    # a single results file would be overwritten by whoever finishes last.
+    results_path = (
+        args.output_dir / f'grid_search_results_task{array_id:03d}.json'
+        if array_count > 1
+        else args.output_dir / 'grid_search_results.json'
+    )
     best_path = args.output_dir / 'grid_search_best.json'
 
     def build_trial(trial_number: int, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -277,6 +295,9 @@ def main() -> None:
 
         if args.pretrained_path is not None:
             command.extend(['--pretrained-path', str(args.pretrained_path)])
+
+        if args.save_distributions:
+            command.append('--save-distributions')
 
         if is_standard_ebo_loss(args.loss):
             lambda_ebo_in = config['lambda_ebo_in']
@@ -423,6 +444,23 @@ def main() -> None:
 
         command = [arg for arg in command if arg is not None]
 
+        # select_grid_best.py rebuilds the ranking from the trial dirs alone, so
+        # the hyperparameters have to live next to the checkpoint.
+        (trial_dir / 'grid_trial.json').write_text(
+            json.dumps(
+                {
+                    'number': trial_number,
+                    'trial_name': trial_name,
+                    'params': config,
+                    'loss': args.loss,
+                    'epochs': args.epochs,
+                    'command': command,
+                },
+                indent=2,
+            ),
+            encoding='utf-8',
+        )
+
         return {
             'number': trial_number,
             'params': config,
@@ -539,9 +577,35 @@ def main() -> None:
         best_payload['selection_rule'] = 'best_val_loss_per_config_then_min_fpr95'
     best_path.write_text(json.dumps(best_payload, indent=2), encoding='utf-8')
 
-    print('Meilleur essai:')
+    print('Meilleur essai (--metric, sur cette tache uniquement):')
     print(json.dumps(best_payload, indent=2))
     print(f'Resultats sauvegardes dans: {results_path}')
+
+    # Double selection over every trial finished on disk, all array tasks
+    # included: the last task to finish writes the complete ranking. Re-run
+    # select_grid_best.py by hand if a task dies before that point.
+    try:
+        written = write_selections(
+            args.output_dir,
+            args.loss,
+            selection_mode=args.selection_mode,
+            top_frac=args.top_frac,
+            expected_epochs=args.epochs,
+        )
+    except RuntimeError as error:
+        print(f'Selection dice/fpr95 impossible pour l instant: {error}')
+        return
+
+    print(f'\nSelections sur les {len(all_configs)} configurations (essais termines uniquement):')
+    for criterion in CRITERIA:
+        payload = json.loads(written[criterion].read_text(encoding='utf-8'))
+        print(
+            f'  [{criterion}] {payload["trial_name"]} '
+            f'(dice={payload["val_metrics"].get("dice")}, '
+            f'fpr95={payload["val_metrics"].get("fpr95")}, '
+            f'{payload["num_trials"]} essais classes)'
+        )
+        print(f'    -> {written[criterion]}')
 
 
 if __name__ == '__main__':

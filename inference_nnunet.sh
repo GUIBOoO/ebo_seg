@@ -18,11 +18,11 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 
 export nnUNet_raw="${nnUNet_raw:-/scratch/$USER/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-/scratch/$USER/nnUNet_preprocessed}"
-NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/BraTS}"
+NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/boundebo/brats}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 
 BEST_CONFIG_JSON="${BEST_CONFIG_JSON:-$NNUNET_RESULTS_BASE/nnunet_grid_search_best.json}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/scratch/$USER/nnUNet_inference_grid_search/BraTS}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/scratch/$USER/nnUNet_inference_grid_search/boundebo/brats}"
 CHECKPOINT_NAME="${CHECKPOINT_NAME:-checkpoint_best.pth}"
 DEVICE="${DEVICE:-cuda}"
 TILE_STEP_SIZE="${TILE_STEP_SIZE:-0.5}"

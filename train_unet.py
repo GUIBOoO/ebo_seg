@@ -139,6 +139,11 @@ def run_epoch(
     total_acc = 0.0
     batches = 0
 
+    # Per-pixel energies are only worth streaming back to the CPU when something
+    # consumes them: the KDE plots, or val's FPR95. Accumulating them regardless
+    # costs a device sync per batch and tens of GB of RAM per epoch.
+    collect_energy = save_energy or not train
+
     all_energies=[]
     all_errors = []
     grad_records = []
@@ -241,18 +246,11 @@ def run_epoch(
                     num_classes,
                 )
 
-            errors = (preds != targets).float()
-            correct_mask = preds == targets
-            incorrect_mask = ~correct_mask
+            if collect_energy:
+                # `energy` was already computed above with the same formula.
+                all_energies.append(energy.detach().cpu().reshape(-1))
+                all_errors.append(incorrect_mask.detach().cpu().reshape(-1).float())
 
-            if uses_hybrid_ebo:
-                energies = hybrid_energy(logits, images)
-            else:
-                energies = energy_fn(logits)
-
-            all_energies.append(energies.detach().cpu().reshape(-1))
-            all_errors.append(errors.detach().cpu().reshape(-1))
-            
             total_loss += loss.item()
             total_dice += dice
             total_iou += iou
@@ -341,6 +339,13 @@ def build_argparser() -> argparse.ArgumentParser:
         action='store_true',
         help='Compute and save per-loss gradient diagnostics during training. Disabled by default to avoid OOM.',
     )
+    parser.add_argument(
+        '--save-distributions',
+        action='store_true',
+        help='Save the per-epoch energy KDE plots. Off by default: producing them forces every '
+             'pixel energy back to the CPU each batch, which costs tens of GB of RAM per epoch. '
+             'Validation FPR95 is reported either way.',
+    )
     return parser
 
 
@@ -351,8 +356,9 @@ def main() -> None:
 
     energy_save_path_val = args.output_dir / "val_distribs"
     energy_save_path_train= args.output_dir / "train_distribs"
-    energy_save_path_val.mkdir(parents=True, exist_ok=True)
-    energy_save_path_train.mkdir(parents=True, exist_ok=True)
+    if args.save_distributions:
+        energy_save_path_val.mkdir(parents=True, exist_ok=True)
+        energy_save_path_train.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device if args.device == 'cpu' or torch.cuda.is_available() else 'cpu')
     args.output_dir.mkdir(parents=True, exist_ok=True)
     dataset_name = infer_dataset_type(base_dir=args.dataset_root, dataset=args.dataset)
@@ -405,6 +411,7 @@ def main() -> None:
         print(f'Input channels: {args.in_channels}')
     print(f'Loss: {args.loss}')
     print(f'Track loss gradients: {args.track_loss_gradients}')
+    print(f'Save distributions: {args.save_distributions}')
     print(
         'EBO params: '
         f'lambda_ebo_in={args.lambda_ebo_in}, '
@@ -430,7 +437,7 @@ def main() -> None:
             device,
             args.num_classes,
             train=True,
-            save_energy=True,
+            save_energy=args.save_distributions,
             energy_save_path=energy_save_path_train,
             epoch=epoch,
             track_loss_gradients=args.track_loss_gradients,
@@ -444,7 +451,7 @@ def main() -> None:
             device,
             args.num_classes,
             train=False,
-            save_energy=True,
+            save_energy=args.save_distributions,
             energy_save_path=energy_save_path_val,
             epoch=epoch,
             track_loss_gradients=False,
