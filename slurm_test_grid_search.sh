@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --partition=compute_full_node
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -15,7 +15,7 @@ source /home/guibo/ebo-seg/bin/activate
 set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg}"
-DATASET="${DATASET:-acdc}"
+DATASET="${DATASET:-brats3}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 # DATASET_ARG is what inference.py's --dataset accepts; brats3 is the same
@@ -36,8 +36,30 @@ case "$DATASET_LOWER" in
     DATA_DIR="$SCRATCH/datasets/Brats/data_slices_3ch"
     DATASET_ARG=brats
     ;;
+  refuge)
+    # Built by extract_data_refuge.py: RGB fundus, 0 bg / 1 disc / 2 cup.
+    DATA_DIR="$SCRATCH/datasets/refuge/data_slices"
+    DATASET_ARG=refuge
+    ;;
+  cataracts)
+    # Built by extract_data_cataracts.py, CaDIS Experiment I (8 classes).
+    # Frames are 512x288: set IMAGE_SIZE only for TransUNet, which needs square input.
+    DATA_DIR="$SCRATCH/datasets/cataracts/data_slices"
+    DATASET_ARG=cataracts
+    ;;
+  chaos_ct)
+    # Built by extract_data_chaos_unet.py --modality ct: liver only.
+    DATA_DIR="$SCRATCH/datasets/chaos/data_slices_ct"
+    DATASET_ARG=chaos
+    ;;
+  chaos_mr)
+    # Built by extract_data_chaos_unet.py --modality mr: liver, kidneys, spleen.
+    DATA_DIR="$SCRATCH/datasets/chaos/data_slices_mr"
+    DATASET_ARG=chaos
+    ;;
   *)
-    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats' or 'brats3'."
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats', 'brats3',"
+    echo "       'refuge', 'cataracts', 'chaos_ct' or 'chaos_mr'."
     exit 1
     ;;
 esac
@@ -54,7 +76,9 @@ if [ "$DATASET_LOWER" = "acdc" ]; then
     unzip -q "$DATASET_ZIP" -d "$UNZIP_TARGET"
 else
     if [ ! -d "$DATA_DIR" ]; then
-        echo "ERROR: prepared BraTS directory not found at $DATA_DIR"
+        echo "ERROR: prepared dataset directory not found at $DATA_DIR"
+        echo "       Build it with the matching extract_data_*.py (extract_data_brats3.py,"
+        echo "       extract_data_refuge.py, extract_data_cataracts.py, extract_data_chaos_unet.py)."
         exit 1
     fi
 fi
@@ -80,12 +104,13 @@ fi
 MODEL_ROOT="${MODEL_ROOT:-$SCRATCH/grid_search/$MODEL_LOWER/$DATASET_LOWER/$LOSS}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRATCH/inference/$MODEL_LOWER/$DATASET_LOWER/grid_search_$LOSS}"
 
-# Two independent ways of picking the winner of the grid search, both written by
+# Three independent ways of picking the winner of the grid search, all written by
 # select_grid_best.py:
 #   dice           - best validation Dice.
 #   dice_top_fpr95 - best (lowest) energy FPR95 among the top TOP_FRAC by Dice.
-# SELECTION=both runs the test inference for each of them.
-SELECTION="${SELECTION:-both}"
+#   fpr95          - best (lowest) energy FPR95 over every config, no Dice filter.
+# SELECTION=both runs dice + dice_top_fpr95, SELECTION=all runs the three.
+SELECTION="${SELECTION:-all}"
 TOP_FRAC="${TOP_FRAC:-0.2}"
 # Rebuild the selection JSONs from the trial dirs when they are missing (grid
 # searches run before this selection existed, or an array task that died).
@@ -103,11 +128,14 @@ else
 fi
 
 case "$SELECTION" in
+  all)   criteria=(dice dice_top_fpr95 fpr95) ;;
   both)  criteria=(dice dice_top_fpr95) ;;
   dice)  criteria=(dice) ;;
   dice_top_fpr95) criteria=(dice_top_fpr95) ;;
+  fpr95) criteria=(fpr95) ;;
   *)
-    echo "ERROR: unsupported SELECTION '$SELECTION'. Expected 'dice', 'dice_top_fpr95' or 'both'."
+    echo "ERROR: unsupported SELECTION '$SELECTION'. Expected 'dice', 'dice_top_fpr95',"
+    echo "       'fpr95', 'both' (dice + dice_top_fpr95) or 'all'."
     exit 1
     ;;
 esac
@@ -115,7 +143,8 @@ esac
 # BEST_CONFIG_JSON only makes sense when a single criterion is requested.
 BEST_CONFIG_JSON="${BEST_CONFIG_JSON:-}"
 if [ -n "$BEST_CONFIG_JSON" ] && [ "${#criteria[@]}" -ne 1 ]; then
-    echo "ERROR: BEST_CONFIG_JSON needs a single criterion. Set SELECTION=dice or SELECTION=dice_top_fpr95."
+    echo "ERROR: BEST_CONFIG_JSON needs a single criterion. Set SELECTION=dice,"
+    echo "       SELECTION=dice_top_fpr95 or SELECTION=fpr95."
     exit 1
 fi
 BATCH_SIZE="${BATCH_SIZE:-4}"
@@ -130,10 +159,11 @@ TRIAL_FILTER="${TRIAL_FILTER:-}"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 
 # The D matrix is fitted on one checkpoint, so each selection needs its own.
-# D_MATRIX stays as a fallback for when both selections land on the same trial.
+# D_MATRIX stays as a fallback for when several selections land on the same trial.
 D_MATRIX="${D_MATRIX:-}"
 D_MATRIX_DICE="${D_MATRIX_DICE:-$D_MATRIX}"
 D_MATRIX_DICE_TOP_FPR95="${D_MATRIX_DICE_TOP_FPR95:-$D_MATRIX}"
+D_MATRIX_FPR95="${D_MATRIX_FPR95:-$D_MATRIX}"
 
 if [ ! -d "$MODEL_ROOT" ]; then
     echo "ERROR: model root not found: $MODEL_ROOT"
@@ -243,6 +273,7 @@ for criterion in "${criteria[@]}"; do
     case "$criterion" in
       dice)           criterion_d_matrix="$D_MATRIX_DICE" ;;
       dice_top_fpr95) criterion_d_matrix="$D_MATRIX_DICE_TOP_FPR95" ;;
+      fpr95)          criterion_d_matrix="$D_MATRIX_FPR95" ;;
     esac
 
     d_matrix_args=()

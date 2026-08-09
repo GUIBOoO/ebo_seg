@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --partition=compute_full_node
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -35,8 +35,30 @@ case "$DATASET_LOWER" in
     DATA_DIR="$SCRATCH/datasets/Brats/data_slices_3ch"
     DATASET_ARG=brats
     ;;
+  refuge)
+    # Built by extract_data_refuge.py: RGB fundus, 0 bg / 1 disc / 2 cup.
+    DATA_DIR="$SCRATCH/datasets/refuge/data_slices"
+    DATASET_ARG=refuge
+    ;;
+  cataracts)
+    # Built by extract_data_cataracts.py, CaDIS Experiment I (8 classes).
+    # Frames are 512x288: set IMAGE_SIZE only for TransUNet, which needs square input.
+    DATA_DIR="$SCRATCH/datasets/cataracts/data_slices"
+    DATASET_ARG=cataracts
+    ;;
+  chaos_ct)
+    # Built by extract_data_chaos_unet.py --modality ct: liver only.
+    DATA_DIR="$SCRATCH/datasets/chaos/data_slices_ct"
+    DATASET_ARG=chaos
+    ;;
+  chaos_mr)
+    # Built by extract_data_chaos_unet.py --modality mr: liver, kidneys, spleen.
+    DATA_DIR="$SCRATCH/datasets/chaos/data_slices_mr"
+    DATASET_ARG=chaos
+    ;;
   *)
-    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats' or 'brats3'."
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats', 'brats3',"
+    echo "       'refuge', 'cataracts', 'chaos_ct' or 'chaos_mr'."
     exit 1
     ;;
 esac
@@ -53,7 +75,9 @@ if [ "$DATASET_LOWER" = "acdc" ]; then
     unzip -q "$DATASET_ZIP" -d "$UNZIP_TARGET"
 else
     if [ ! -d "$DATA_DIR" ]; then
-        echo "ERROR: prepared BraTS directory not found at $DATA_DIR"
+        echo "ERROR: prepared dataset directory not found at $DATA_DIR"
+        echo "       Build it with the matching extract_data_*.py (extract_data_brats3.py,"
+        echo "       extract_data_refuge.py, extract_data_cataracts.py, extract_data_chaos_unet.py)."
         exit 1
     fi
 fi
@@ -75,8 +99,8 @@ if [ "$MODEL_LOWER" = "transunet" ] && [ "$DATASET_LOWER" = "brats" ]; then
     exit 1
 fi
 
-DEFAULT_CHECKPOINT="$SCRATCH/models/ebo_seg/$MODEL_LOWER/$DATASET_LOWER/best_ce_dice.pt"
-DEFAULT_OUTPUT_DIR="$SCRATCH/inference/$MODEL_LOWER/$DATASET_LOWER"
+DEFAULT_CHECKPOINT="$SCRATCH/models/ebo_seg/$MODEL_LOWER/$DATASET_ARG/best_ce_dice.pt"
+DEFAULT_OUTPUT_DIR="$SCRATCH/inference/$MODEL_LOWER/$DATASET_ARG/baseline"
 
 CHECKPOINT="${CHECKPOINT:-$DEFAULT_CHECKPOINT}"
 OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}"
@@ -91,7 +115,7 @@ MODES="${MODES:-all}"
 
 LAMBDA_WEIGHT="${LAMBDA_WEIGHT:-0.5}"
 LAMBDA_TAG=$(printf '%g' "$LAMBDA_WEIGHT")
-D_MATRIX="${D_MATRIX:-$SCRATCH/d_matrices/$MODEL_LOWER/$DATASET_LOWER/d_matrix_${DATASET_ARG}_val_lambda_${LAMBDA_TAG}.npy}"
+D_MATRIX="${D_MATRIX:-$SCRATCH/d_matrices/$MODEL_LOWER/$DATASET_ARG/d_matrix_${DATASET_ARG}_val_lambda_${LAMBDA_TAG}.npy}"
 if [ "$D_MATRIX" = "none" ]; then
     D_MATRIX=""
 fi

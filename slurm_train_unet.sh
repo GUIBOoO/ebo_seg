@@ -14,7 +14,7 @@ source /home/guibo/ebo-seg/bin/activate
 
 set -euo pipefail
 
-DATASET="${DATASET:-brats3}"
+DATASET="${DATASET:-cataracts}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 # DATASET_ARG is what train_unet.py's --dataset accepts; brats3 is the same
@@ -41,8 +41,38 @@ case "$DATASET_LOWER" in
     DEFAULT_NUM_CLASSES=4
     DEFAULT_IN_CHANNELS=3
     ;;
+  refuge)
+    # Built by extract_data_refuge.py: RGB fundus, 0 bg / 1 disc / 2 cup.
+    DATA_DIR="$SCRATCH/datasets/refuge/data_slices"
+    DATASET_ARG=refuge
+    DEFAULT_NUM_CLASSES=3
+    DEFAULT_IN_CHANNELS=3
+    ;;
+  cataracts)
+    # Built by extract_data_cataracts.py, CaDIS Experiment I (8 classes).
+    # Frames are 512x288: set IMAGE_SIZE only for TransUNet, which needs square input.
+    DATA_DIR="$SCRATCH/datasets/cataracts/data_slices"
+    DATASET_ARG=cataracts
+    DEFAULT_NUM_CLASSES=8
+    DEFAULT_IN_CHANNELS=3
+    ;;
+  chaos_ct)
+    # Built by extract_data_chaos_unet.py --modality ct: liver only.
+    DATA_DIR="$SCRATCH/datasets/chaos/data_slices_ct"
+    DATASET_ARG=chaos
+    DEFAULT_NUM_CLASSES=2
+    DEFAULT_IN_CHANNELS=1
+    ;;
+  chaos_mr)
+    # Built by extract_data_chaos_unet.py --modality mr: liver, kidneys, spleen.
+    DATA_DIR="$SCRATCH/datasets/chaos/data_slices_mr"
+    DATASET_ARG=chaos
+    DEFAULT_NUM_CLASSES=5
+    DEFAULT_IN_CHANNELS=1
+    ;;
   *)
-    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats' or 'brats3'."
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats', 'brats3',"
+    echo "       'refuge', 'cataracts', 'chaos_ct' or 'chaos_mr'."
     exit 1
     ;;
 esac
@@ -59,7 +89,9 @@ if [ "$DATASET_LOWER" = "acdc" ]; then
     unzip -q "$DATASET_ZIP" -d "$UNZIP_TARGET"
 else
     if [ ! -d "$DATA_DIR" ]; then
-        echo "ERROR: prepared BraTS directory not found at $DATA_DIR"
+        echo "ERROR: prepared dataset directory not found at $DATA_DIR"
+        echo "       Build it with the matching extract_data_*.py (extract_data_brats3.py,"
+        echo "       extract_data_refuge.py, extract_data_cataracts.py, extract_data_chaos_unet.py)."
         exit 1
     fi
 fi
@@ -70,9 +102,9 @@ find "$DATA_DIR" -maxdepth 1 -type d
 export PYTHON_DATA_DIR="$DATA_DIR"
 DATASET_ROOT="${DATASET_ROOT:-$DATA_DIR}"
 
-OUTPUT_DIR="${OUTPUT_DIR:-/home/guibo/links/scratch/models/ebo_seg/transunet/brats_baseline}"
+OUTPUT_DIR="${OUTPUT_DIR:-/home/guibo/links/scratch/models/ebo_seg/unet/cataracts}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
-MODEL="${MODEL:-transunet}"
+MODEL="${MODEL:-unet}"
 PRETRAINED_PATH="${PRETRAINED_PATH:-/home/guibo/links/scratch/pretrained/transunet/R50+ViT-B_16.npz}"
 EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"

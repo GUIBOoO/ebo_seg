@@ -48,7 +48,18 @@ TRAINER="${TRAINER:-CEDiceTrainer}"
 PLANS="${PLANS:-nnUNetPlans}"
 CONFIGURATION="${CONFIGURATION:-2d}"
 
-BEST_CONFIG_JSON="${BEST_CONFIG_JSON:-$NNUNET_RESULTS_BASE/nnunet_grid_search_best.json}"
+# MODE=best picks one of the three selections written by select_nnunet_grid_best.py
+# (dice, dice_top_fpr95, fpr95), the same criteria as the U-Net pipeline. The D
+# matrix is fitted on a single checkpoint, so one run is needed per criterion.
+CRITERION="${CRITERION:-dice}"
+case "$CRITERION" in
+  dice|dice_top_fpr95|fpr95) ;;
+  *)
+    echo "ERROR: unsupported CRITERION '$CRITERION'. Expected 'dice', 'dice_top_fpr95' or 'fpr95'."
+    exit 1
+    ;;
+esac
+BEST_CONFIG_JSON="${BEST_CONFIG_JSON:-$NNUNET_RESULTS_BASE/nnunet_grid_search_best_${CRITERION}.json}"
 MODEL_FOLDER="${MODEL_FOLDER:-}"
 FOLD="${FOLD:-}"
 CHECKPOINT_NAME="${CHECKPOINT_NAME:-checkpoint_best.pth}"
@@ -98,6 +109,7 @@ case "$MODE" in
         if [ ! -f "$BEST_CONFIG_JSON" ]; then
             echo "ERROR: best config JSON not found: $BEST_CONFIG_JSON"
             echo "Produce it with: SELECT_BEST=1 NNUNET_RESULTS_BASE=$NNUNET_RESULTS_BASE bash nnunet_grid_search.sh"
+            echo "(or pick another criterion with CRITERION=dice|dice_top_fpr95|fpr95)"
             exit 1
         fi
         model_args+=(--best-json "$BEST_CONFIG_JSON")
@@ -116,7 +128,8 @@ fi
 # Keep baseline and grid-best D matrices apart: d_matrix_nnunet.py names its
 # output from the dataset and split only, so a shared dir would overwrite.
 if [ "$MODE" = "best" ]; then
-    DEFAULT_OUTPUT_SUBDIR="grid_best"
+    # One D matrix per criterion: the three selections can land on different trials.
+    DEFAULT_OUTPUT_SUBDIR="grid_best_$CRITERION"
 else
     DEFAULT_OUTPUT_SUBDIR="$(basename "$MODEL_FOLDER")"
 fi
@@ -137,7 +150,11 @@ cd "$ROOT_DIR"
 
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
 echo "Dataset        : $DATASET_LOWER (Dataset$(printf '%03d' "$DATASET_ID"))"
-echo "Mode           : $MODE"
+if [ "$MODE" = "best" ]; then
+    echo "Mode           : $MODE (criterion $CRITERION)"
+else
+    echo "Mode           : $MODE"
+fi
 echo "Model source   : ${MODEL_FOLDER:-$BEST_CONFIG_JSON}"
 echo "Fold           : ${FOLD:-from best-json (default 0)}"
 echo "Checkpoint     : $CHECKPOINT_NAME"

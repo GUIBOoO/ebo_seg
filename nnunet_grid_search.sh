@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=00:05:00
+#SBATCH --time=01:00:00
 #SBATCH --array=0
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -14,7 +14,7 @@ module load python/3.10.13
 source ~/nnunet/bin/activate
 
 ROOT_DIR="${ROOT_DIR:-/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg}"
-DATASET_ID="${DATASET_ID:-1}"
+DATASET_ID="${DATASET_ID:-2}"
 CONFIGURATION="${CONFIGURATION:-2d}"
 FOLD="${FOLD:-0}"
 PLANS="${PLANS:-nnUNetPlans}"
@@ -24,24 +24,55 @@ DEVICE="${DEVICE:-cuda}"
 NUM_GPUS="${NUM_GPUS:-}"
 NNUNET_FPR95_MAX_PIXELS="${NNUNET_FPR95_MAX_PIXELS:-200000}"
 NNUNET_FPR95_MAX_PIXELS_PER_BATCH="${NNUNET_FPR95_MAX_PIXELS_PER_BATCH:-50000}"
+# The fpr95 based selections rank trials on the FPR95 of the checkpoint epoch,
+# so it has to be measured at every epoch. Set to 0 to only measure it on val
+# loss improvements (cheaper, but then only the dice selection is meaningful).
+NNUNET_FPR95_EVERY_EPOCH="${NNUNET_FPR95_EVERY_EPOCH:-0}"
 
 export nnUNet_raw="${nnUNet_raw:-/scratch/$USER/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-/scratch/$USER/nnUNet_preprocessed}"
-NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/boundebo/acdc}"
+NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/boundebo/brats}"
 export nnUNet_compile="${nnUNet_compile:-False}"
 export nnUNet_extTrainer="${nnUNet_extTrainer:-$ROOT_DIR/nnunet_ext_trainers}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 export NNUNET_FPR95_MAX_PIXELS
 export NNUNET_FPR95_MAX_PIXELS_PER_BATCH
+export NNUNET_FPR95_EVERY_EPOCH
 SELECT_BEST="${SELECT_BEST:-1}"
 BEST_OUTPUT_JSON="${BEST_OUTPUT_JSON:-$NNUNET_RESULTS_BASE/nnunet_grid_search_best.json}"
+# SELECT_BEST=1 writes one JSON per selection strategy in $NNUNET_RESULTS_BASE,
+# the same three as the U-Net grid search (select_grid_best.py):
+#   nnunet_grid_search_best_dice.json           - best validation Dice.
+#   nnunet_grid_search_best_dice_top_fpr95.json - lowest energy FPR95 among the
+#                                                 top TOP_FRAC trials by Dice.
+#   nnunet_grid_search_best_fpr95.json          - lowest energy FPR95 overall.
+# plus nnunet_grid_search_selection_summary.json, which ranks every trial.
+TOP_FRAC="${TOP_FRAC:-0.2}"
+# best: rank on the epoch of checkpoint_best.pth (min val loss).
+# last: rank on checkpoint_final.pth (last epoch).
+SELECTION_MODE="${SELECTION_MODE:-best}"
+# Drops trials with a shorter history (still running / crashed). Empty keeps all.
+EXPECTED_EPOCHS="${EXPECTED_EPOCHS:-}"
+# Extra single-winner copy kept for the older callers that read
+# nnunet_grid_search_best.json: it duplicates one of the three criteria.
+# LEGACY_CRITERION=none writes only the three per-criterion files.
+LEGACY_CRITERION="${LEGACY_CRITERION:-dice}"
 
 if [ "$SELECT_BEST" = "1" ]; then
     cd "$ROOT_DIR"
+    expected_epochs_args=()
+    if [ -n "$EXPECTED_EPOCHS" ]; then
+        expected_epochs_args+=(--expected-epochs "$EXPECTED_EPOCHS")
+    fi
     python select_nnunet_grid_best.py \
         --results-base "$NNUNET_RESULTS_BASE" \
         --output-json "$BEST_OUTPUT_JSON" \
-        --fold "$FOLD"
+        --fold "$FOLD" \
+        --loss "$LOSS" \
+        --selection-mode "$SELECTION_MODE" \
+        --top-frac "$TOP_FRAC" \
+        --legacy-criterion "$LEGACY_CRITERION" \
+        "${expected_epochs_args[@]}"
     exit 0
 fi
 
@@ -176,6 +207,35 @@ TRIAL_NAME="trial_$(printf '%03d' "$TASK_ID")_fold_${FOLD}_${LOSS}_cenin_$(sanit
 export nnUNet_results="$NNUNET_RESULTS_BASE/$TRIAL_NAME"
 mkdir -p "$nnUNet_results"
 
+# select_nnunet_grid_best.py rebuilds the ranking from the trial dirs alone, so
+# the hyperparameters have to live next to the checkpoints (same role as the
+# grid_trial.json written by grid_search.py for the U-Net runs).
+cat > "$nnUNet_results/grid_trial.json" <<JSON
+{
+  "number": $TASK_ID,
+  "trial_name": "$TRIAL_NAME",
+  "loss": "$LOSS",
+  "trainer": "$TRAINER",
+  "dataset_id": "$DATASET_ID",
+  "configuration": "$CONFIGURATION",
+  "fold": "$FOLD",
+  "params": {
+    "lambda_ebo_in": "$LAMBDA_EBO_IN",
+    "lambda_ebo_corr": "$LAMBDA_EBO_CORR",
+    "lambda_ebo_cen_in": "$LAMBDA_EBO_CEN_IN",
+    "lambda_ebo_out_in": "$LAMBDA_EBO_OUT_IN",
+    "lambda_ebo_cen_corr": "$LAMBDA_EBO_CEN_CORR",
+    "lambda_ebo_out_corr": "$LAMBDA_EBO_OUT_CORR",
+    "boundary_k": "$BOUNDARY_K",
+    "margin_correct": "$MARGIN_CORRECT",
+    "margin_miss": "$MARGIN_MISS",
+    "barrier_t": "$BARRIER_T",
+    "barrier_t_growth": "$BARRIER_T_GROWTH",
+    "rho": "$RHO"
+  }
+}
+JSON
+
 cd "$ROOT_DIR"
 
 python -c "from nnunet_split_utils import sync_split_files_by_id; sync_split_files_by_id($DATASET_ID)"
@@ -189,7 +249,7 @@ echo "Fold mode      : single fold only"
 echo "Trainer        : $TRAINER"
 echo "Loss           : $LOSS"
 echo "nnUNet_results : $nnUNet_results"
-echo "FPR95 pixels   : max=$NNUNET_FPR95_MAX_PIXELS per_batch=$NNUNET_FPR95_MAX_PIXELS_PER_BATCH"
+echo "FPR95 pixels   : max=$NNUNET_FPR95_MAX_PIXELS per_batch=$NNUNET_FPR95_MAX_PIXELS_PER_BATCH every_epoch=$NNUNET_FPR95_EVERY_EPOCH"
 echo "Params         : lin=$LAMBDA_EBO_IN lcorr=$LAMBDA_EBO_CORR cenin=$LAMBDA_EBO_CEN_IN outin=$LAMBDA_EBO_OUT_IN cencorr=$LAMBDA_EBO_CEN_CORR outcorr=$LAMBDA_EBO_OUT_CORR bk=$BOUNDARY_K mcorr=$MARGIN_CORRECT mmiss=$MARGIN_MISS t=$BARRIER_T tg=$BARRIER_T_GROWTH rho=$RHO"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 

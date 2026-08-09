@@ -88,7 +88,12 @@ class _EBOTrainerBase(nnUNetTrainer):
         # self.num_epochs = 100
         self._best_val_loss = None
         self._best_loss_fpr95 = None
+        self._best_val_dice = None
+        self._best_epoch = None
         self._last_val_energy_fpr95 = float("nan")
+        self._last_val_dice = float("nan")
+        self._last_val_dice_per_class = []
+        self._last_train_loss = float("nan")
         self._ebo_validation_history = []
 
     def _build_loss(self):
@@ -257,8 +262,14 @@ class _EBOTrainerBase(nnUNetTrainer):
 
         global_dc_per_class = [i for i in [2 * i / (2 * i + j + k) for i, j, k in zip(tp, fp, fn)]]
         mean_fg_dice = np.nanmean(global_dc_per_class)
+        # select_nnunet_grid_best.py ranks trials on the Dice and the FPR95 of the
+        # checkpoint epoch, exactly like select_grid_best.py does for the U-Net
+        # runs, so both have to be recorded at every epoch and not only when the
+        # val loss improves. NNUNET_FPR95_EVERY_EPOCH=0 restores the old
+        # (cheaper) behaviour, at the cost of the fpr95 based selections.
         should_compute_fpr95 = (
-            self._best_val_loss is None
+            _env_int("NNUNET_FPR95_EVERY_EPOCH", 1) == 1
+            or self._best_val_loss is None
             or loss_here < self._best_val_loss
             or math.isclose(float(loss_here), float(self._best_val_loss), rel_tol=0.0, abs_tol=1e-12)
         )
@@ -288,6 +299,8 @@ class _EBOTrainerBase(nnUNetTrainer):
         self.logger.log("dice_per_class_or_region", global_dc_per_class, self.current_epoch)
         self.logger.log("val_losses", loss_here, self.current_epoch)
         self._last_val_energy_fpr95 = float(val_energy_fpr95)
+        self._last_val_dice = float(mean_fg_dice)
+        self._last_val_dice_per_class = [float(i) for i in global_dc_per_class]
 
     @staticmethod
     def _is_better_loss_fpr95(loss_value: float, fpr95_value: float, best_loss: float | None, best_fpr95: float | None) -> bool:
@@ -311,10 +324,19 @@ class _EBOTrainerBase(nnUNetTrainer):
 
         val_loss = float(self.logger.get_value("val_losses", step=-1))
         val_fpr95 = float(self._last_val_energy_fpr95)
+        val_dice = float(self._last_val_dice)
+        # 'train'/'val' sub-dicts with loss/dice/fpr95 mirror the history written
+        # by train_unet.py, so select_grid_best.py's epoch picking and ranking
+        # apply unchanged to these trials.
         record = {
             "epoch": int(self.current_epoch),
-            "val_loss": val_loss,
-            "val_energy_fpr95": val_fpr95,
+            "train": {"loss": float(self._last_train_loss)},
+            "val": {
+                "loss": val_loss,
+                "dice": val_dice,
+                "fpr95": val_fpr95,
+                "dice_per_class": list(self._last_val_dice_per_class),
+            },
             "selected_checkpoint": bool(selected),
             "checkpoint_name": "checkpoint_best.pth" if selected else None,
         }
@@ -329,17 +351,23 @@ class _EBOTrainerBase(nnUNetTrainer):
             "selection_rule": "min_val_loss_then_min_val_energy_fpr95",
             "best_val_loss": self._best_val_loss,
             "best_val_energy_fpr95": self._best_loss_fpr95,
+            "best_val_dice": self._best_val_dice,
+            "best_epoch": self._best_epoch,
             "best_checkpoint": "checkpoint_best.pth",
+            "last_checkpoint": "checkpoint_final.pth",
             "output_folder": self.output_folder,
             "current_epoch": int(self.current_epoch),
+            "num_epochs": len(self._ebo_validation_history),
         }
         with open(summary_path, "w", encoding="utf-8") as file_obj:
             json.dump(summary, file_obj, indent=2, allow_nan=True)
 
     def on_epoch_end(self):
         self.logger.log("epoch_end_timestamps", time(), self.current_epoch)
-        self.print_to_log_file("train_loss", np.round(self.logger.get_value("train_losses", step=-1), decimals=4))
+        self._last_train_loss = float(self.logger.get_value("train_losses", step=-1))
+        self.print_to_log_file("train_loss", np.round(self._last_train_loss, decimals=4))
         self.print_to_log_file("val_loss", np.round(self.logger.get_value("val_losses", step=-1), decimals=4))
+        self.print_to_log_file("val_dice", np.round(self._last_val_dice, decimals=4))
         self.print_to_log_file("val_energy_fpr95", np.round(self._last_val_energy_fpr95, decimals=4))
         self.print_to_log_file("Pseudo dice", [np.round(i, decimals=4) for i in self.logger.get_value("dice_per_class_or_region", step=-1)])
         self.print_to_log_file(
@@ -356,6 +384,8 @@ class _EBOTrainerBase(nnUNetTrainer):
         if selected:
             self._best_val_loss = val_loss
             self._best_loss_fpr95 = val_fpr95
+            self._best_val_dice = float(self._last_val_dice)
+            self._best_epoch = int(current_epoch)
             self.print_to_log_file(
                 f"New best validation loss/FPR95 checkpoint: val_loss={np.round(val_loss, decimals=4)}, "
                 f"val_energy_fpr95={np.round(val_fpr95, decimals=4)}"
@@ -379,6 +409,8 @@ class _EBOTrainerBase(nnUNetTrainer):
                 summary = json.load(file_obj)
             self._best_val_loss = summary.get("best_val_loss")
             self._best_loss_fpr95 = summary.get("best_val_energy_fpr95")
+            self._best_val_dice = summary.get("best_val_dice")
+            self._best_epoch = summary.get("best_epoch")
         if isfile(history_path):
             with open(history_path, "r", encoding="utf-8") as file_obj:
                 self._ebo_validation_history = json.load(file_obj)

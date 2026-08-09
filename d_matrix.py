@@ -6,8 +6,8 @@ import torch
 import tqdm
 
 from d_matrix_core import DMatrixAccumulator, save_d_matrix
-from datasets import get_dataloaders, infer_dataset_type
-from models import build_model_acdc, build_model_brats
+from datasets import SUPPORTED_DATASETS, get_dataloaders, infer_dataset_type
+from models import build_model_2d, build_model_acdc
 
 
 def _normalize_masks(masks: torch.Tensor) -> torch.Tensor:
@@ -46,7 +46,7 @@ def _load_checkpoint_model(
     if dataset_name == "acdc":
         model = build_model_acdc(resolved_model_name, resolved_num_classes, img_size=img_size)
     else:
-        model = build_model_brats(
+        model = build_model_2d(
             resolved_model_name, resolved_num_classes, img_size=img_size, in_channels=in_channels
         )
 
@@ -99,7 +99,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compute the RELU D matrix for a pretrained segmentation model.")
     parser.add_argument("--checkpoint", type=Path, required=True, help="Checkpoint saved by train_unet.py.")
     parser.add_argument("--dataset-root", type=Path, required=True, help="Dataset root.")
-    parser.add_argument("--dataset", type=str, choices=["acdc", "brats"], default=None)
+    parser.add_argument("--dataset", type=str, choices=list(SUPPORTED_DATASETS), default=None)
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory where D will be saved.")
     parser.add_argument("--split", type=str, choices=["train", "val", "test"], default="val")
     parser.add_argument("--batch-size", type=int, default=4)

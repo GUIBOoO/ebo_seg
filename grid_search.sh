@@ -42,8 +42,38 @@ case "$DATASET_LOWER" in
     DEFAULT_NUM_CLASSES=4
     DEFAULT_IN_CHANNELS=3
     ;;
+  refuge)
+    # Built by extract_data_refuge.py: RGB fundus, 0 bg / 1 disc / 2 cup.
+    DATA_DIR="$SCRATCH/datasets/refuge/data_slices"
+    DATASET_ARG=refuge
+    DEFAULT_NUM_CLASSES=3
+    DEFAULT_IN_CHANNELS=3
+    ;;
+  cataracts)
+    # Built by extract_data_cataracts.py, CaDIS Experiment I (8 classes).
+    # Frames are 512x288: set IMAGE_SIZE only for TransUNet, which needs square input.
+    DATA_DIR="$SCRATCH/datasets/cataracts/data_slices"
+    DATASET_ARG=cataracts
+    DEFAULT_NUM_CLASSES=8
+    DEFAULT_IN_CHANNELS=3
+    ;;
+  chaos_ct)
+    # Built by extract_data_chaos_unet.py --modality ct: liver only.
+    DATA_DIR="$SCRATCH/datasets/chaos/data_slices_ct"
+    DATASET_ARG=chaos
+    DEFAULT_NUM_CLASSES=2
+    DEFAULT_IN_CHANNELS=1
+    ;;
+  chaos_mr)
+    # Built by extract_data_chaos_unet.py --modality mr: liver, kidneys, spleen.
+    DATA_DIR="$SCRATCH/datasets/chaos/data_slices_mr"
+    DATASET_ARG=chaos
+    DEFAULT_NUM_CLASSES=5
+    DEFAULT_IN_CHANNELS=1
+    ;;
   *)
-    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats' or 'brats3'."
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats', 'brats3',"
+    echo "       'refuge', 'cataracts', 'chaos_ct' or 'chaos_mr'."
     exit 1
     ;;
 esac
@@ -60,7 +90,9 @@ if [ "$DATASET_LOWER" = "acdc" ]; then
     unzip -q "$DATASET_ZIP" -d "$UNZIP_TARGET"
 else
     if [ ! -d "$DATA_DIR" ]; then
-        echo "ERROR: prepared BraTS directory not found at $DATA_DIR"
+        echo "ERROR: prepared dataset directory not found at $DATA_DIR"
+        echo "       Build it with the matching extract_data_*.py (extract_data_brats3.py,"
+        echo "       extract_data_refuge.py, extract_data_cataracts.py, extract_data_chaos_unet.py)."
         exit 1
     fi
 fi
@@ -89,7 +121,8 @@ DEVICE="${DEVICE:-cuda}"
 METRIC="${METRIC:-fpr95}"
 SELECTION_MODE="${SELECTION_MODE:-best}"
 # Fraction of best-Dice trials kept before minimizing FPR95, for the
-# grid_search_best_dice_top_fpr95.json selection.
+# grid_search_best_dice_top_fpr95.json selection. The grid_search_best_fpr95.json
+# selection (lowest FPR95 over every config) ignores it.
 TOP_FRAC="${TOP_FRAC:-0.2}"
 MODELS_PER_GPU="${MODELS_PER_GPU:-3}"
 MAX_PARALLEL="${MAX_PARALLEL:-}"
@@ -97,12 +130,12 @@ GPU_IDS="${GPU_IDS:-}"
 
 LAMBDA_EBO_IN_GRID="${LAMBDA_EBO_IN_GRID:-0.5 2 5}"
 LAMBDA_EBO_CORR_GRID="${LAMBDA_EBO_CORR_GRID:-0.1}"
-LAMBDA_EBO_CEN_IN_GRID="${LAMBDA_EBO_CEN_IN_GRID:-0.1 0.5 1}"
+LAMBDA_EBO_CEN_IN_GRID="${LAMBDA_EBO_CEN_IN_GRID:-0.1 0.5}"
 LAMBDA_EBO_OUT_IN_GRID="${LAMBDA_EBO_OUT_IN_GRID:-2 5}"
 LAMBDA_EBO_CEN_CORR_GRID="${LAMBDA_EBO_CEN_CORR_GRID:-0.1 }"
 LAMBDA_EBO_OUT_CORR_GRID="${LAMBDA_EBO_OUT_CORR_GRID:-0.1 0.5}"
 BOUNDARY_K_GRID="${BOUNDARY_K_GRID:-3}"
-MARGIN_CORRECT_GRID="${MARGIN_CORRECT_GRID:--17 -20}"
+MARGIN_CORRECT_GRID="${MARGIN_CORRECT_GRID:--15 -10 -8}"
 MARGIN_MISS_GRID="${MARGIN_MISS_GRID:--5}"
 BARRIER_T_GRID="${BARRIER_T_GRID:-1.0}"
 BARRIER_T_GROWTH_GRID="${BARRIER_T_GROWTH_GRID:-${BARRIER_T_GROWTH:-1.005}}"

@@ -16,7 +16,7 @@ set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg}"
 
-DATASET="${DATASET:-acdc}"
+DATASET="${DATASET:-refuge}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 # DATASET_ARG is what d_matrix.py's --dataset accepts; brats3 is the same loader
@@ -37,8 +37,30 @@ case "$DATASET_LOWER" in
     DATA_DIR="$SCRATCH/datasets/Brats/data_slices_3ch"
     DATASET_ARG=brats
     ;;
+  refuge)
+    # Built by extract_data_refuge.py: RGB fundus, 0 bg / 1 disc / 2 cup.
+    DATA_DIR="$SCRATCH/datasets/refuge/data_slices"
+    DATASET_ARG=refuge
+    ;;
+  cataracts)
+    # Built by extract_data_cataracts.py, CaDIS Experiment I (8 classes).
+    # Frames are 512x288: set IMAGE_SIZE only for TransUNet, which needs square input.
+    DATA_DIR="$SCRATCH/datasets/cataracts/data_slices"
+    DATASET_ARG=cataracts
+    ;;
+  chaos_ct)
+    # Built by extract_data_chaos_unet.py --modality ct: liver only.
+    DATA_DIR="$SCRATCH/datasets/chaos/data_slices_ct"
+    DATASET_ARG=chaos
+    ;;
+  chaos_mr)
+    # Built by extract_data_chaos_unet.py --modality mr: liver, kidneys, spleen.
+    DATA_DIR="$SCRATCH/datasets/chaos/data_slices_mr"
+    DATASET_ARG=chaos
+    ;;
   *)
-    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats' or 'brats3'."
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats', 'brats3',"
+    echo "       'refuge', 'cataracts', 'chaos_ct' or 'chaos_mr'."
     exit 1
     ;;
 esac
@@ -55,7 +77,9 @@ if [ "$DATASET_LOWER" = "acdc" ]; then
     unzip -q "$DATASET_ZIP" -d "$UNZIP_TARGET"
 else
     if [ ! -d "$DATA_DIR" ]; then
-        echo "ERROR: prepared BraTS directory not found at $DATA_DIR"
+        echo "ERROR: prepared dataset directory not found at $DATA_DIR"
+        echo "       Build it with the matching extract_data_*.py (extract_data_brats3.py,"
+        echo "       extract_data_refuge.py, extract_data_cataracts.py, extract_data_chaos_unet.py)."
         exit 1
     fi
 fi
@@ -66,11 +90,11 @@ DATASET_ROOT="${DATASET_ROOT:-$DATA_DIR}"
 # MODEL only picks the default checkpoint/output paths. The architecture,
 # image_size and in_channels are read back from the checkpoint by d_matrix.py,
 # so a TransUNet checkpoint is rebuilt with the geometry it was trained on.
-MODEL="${MODEL:-transunet}"
+MODEL="${MODEL:-unet}"
 MODEL_LOWER=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')
 
-CHECKPOINT=${CHECKPOINT:-"$SCRATCH/models/ebo_seg/$MODEL_LOWER/$DATASET_LOWER/best_ce_dice.pt"}
-OUTPUT_DIR=${OUTPUT_DIR:-"$SCRATCH/d_matrices/$MODEL_LOWER/$DATASET_LOWER"}
+CHECKPOINT=${CHECKPOINT:-"$SCRATCH/models/ebo_seg/$MODEL_LOWER/$DATASET_ARG/best_ce_dice.pt"}
+OUTPUT_DIR=${OUTPUT_DIR:-"$SCRATCH/d_matrices/$MODEL_LOWER/$DATASET_ARG"}
 # D must be estimated on a split you do NOT report on: val, not test.
 SPLIT=${SPLIT:-"val"}
 BATCH_SIZE=${BATCH_SIZE:-4}

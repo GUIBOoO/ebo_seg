@@ -7,13 +7,14 @@ from typing import Any, Dict, List, Tuple
 import os
 import math
 
+from datasets import SUPPORTED_DATASETS
 from losses import normalize_loss_name
 from select_grid_best import CRITERIA, write_selections
 
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Grid search Optuna pour les hyperparametres EBO.')
-    parser.add_argument('--dataset', type=str, choices=['acdc', 'brats'], default=None)
+    parser.add_argument('--dataset', type=str, choices=list(SUPPORTED_DATASETS), default=None)
     parser.add_argument('--dataset-root', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--model', type=str, default='unet')
@@ -39,7 +40,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--top-frac', type=float, default=0.2,
         help='Fraction des meilleurs Dice gardee avant de minimiser FPR95 '
-             '(selection grid_search_best_dice_top_fpr95.json).',
+             '(selection grid_search_best_dice_top_fpr95.json). La selection '
+             'grid_search_best_fpr95.json ignore ce filtre.',
     )
     parser.add_argument('--python-bin', type=str, default=sys.executable)
     parser.add_argument(
@@ -581,7 +583,7 @@ def main() -> None:
     print(json.dumps(best_payload, indent=2))
     print(f'Resultats sauvegardes dans: {results_path}')
 
-    # Double selection over every trial finished on disk, all array tasks
+    # Triple selection over every trial finished on disk, all array tasks
     # included: the last task to finish writes the complete ranking. Re-run
     # select_grid_best.py by hand if a task dies before that point.
     try:
@@ -601,7 +603,8 @@ def main() -> None:
         payload = json.loads(written[criterion].read_text(encoding='utf-8'))
         print(
             f'  [{criterion}] {payload["trial_name"]} '
-            f'(dice={payload["val_metrics"].get("dice")}, '
+            f'(loss={payload["val_metrics"].get("loss")}, '
+            f'dice={payload["val_metrics"].get("dice")}, '
             f'fpr95={payload["val_metrics"].get("fpr95")}, '
             f'{payload["num_trials"]} essais classes)'
         )

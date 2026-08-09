@@ -1,13 +1,15 @@
 """Select the best trials of a (non-nnU-Net) EBO grid search.
 
-Two selections are produced, so that testing can compare a purely segmentation
-oriented pick against an OOD oriented one:
+Three selections are produced, so that testing can compare a purely
+segmentation oriented pick against OOD oriented ones:
 
   * ``dice``          - the trial with the best validation Dice.
   * ``dice_top_fpr95``- among the top ``--top-frac`` trials by validation Dice,
                         the one with the lowest energy FPR95.
+  * ``fpr95``         - the trial with the lowest energy FPR95, over every
+                        config, with no Dice constraint.
 
-Both selections rank trials using the metrics of the epoch whose checkpoint was
+All selections rank trials using the metrics of the epoch whose checkpoint was
 actually written to disk by train_unet.py: ``best_<loss>.pt`` is the minimum
 val-loss epoch, ``last_<loss>.pt`` is the final epoch. Ranking on any other
 epoch would name a model that cannot be loaded back at test time.
@@ -21,7 +23,10 @@ from typing import Any, Dict, List, Optional
 
 DICE_CRITERION = 'dice'
 TOP_DICE_FPR95_CRITERION = 'dice_top_fpr95'
-CRITERIA = (DICE_CRITERION, TOP_DICE_FPR95_CRITERION)
+FPR95_CRITERION = 'fpr95'
+CRITERIA = (DICE_CRITERION, TOP_DICE_FPR95_CRITERION, FPR95_CRITERION)
+
+SUMMARY_FILENAME = 'grid_search_selection_summary.json'
 
 
 def selection_filename(criterion: str) -> str:
@@ -48,7 +53,12 @@ def _jsonable(value: float) -> Optional[float]:
 
 
 def _jsonable_trial(trial: Dict[str, Any]) -> Dict[str, Any]:
-    return {**trial, 'dice': _jsonable(trial['dice']), 'fpr95': _jsonable(trial['fpr95'])}
+    return {
+        **trial,
+        'loss': _jsonable(trial['loss']),
+        'dice': _jsonable(trial['dice']),
+        'fpr95': _jsonable(trial['fpr95']),
+    }
 
 
 def selection_epoch(history: List[Dict[str, Any]], selection_mode: str) -> Dict[str, Any]:
@@ -110,6 +120,7 @@ def collect_trials(
             'num_epochs': len(history),
             'params': params,
             'val_metrics': epoch_entry['val'],
+            'loss': _as_float(epoch_entry['val'].get('loss'), math.inf),
             'dice': _as_float(epoch_entry['val'].get('dice'), -math.inf),
             'fpr95': _as_float(epoch_entry['val'].get('fpr95'), math.inf),
         })
@@ -136,6 +147,11 @@ def select_best_fpr95_in_top_dice(trials: List[Dict[str, Any]], top_frac: float)
     return min(pool, key=lambda trial: (trial['fpr95'], -trial['dice']))
 
 
+def select_best_fpr95(trials: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Lowest FPR95 over every config; val loss then Dice only break ties."""
+    return min(trials, key=lambda trial: (trial['fpr95'], trial['loss'], -trial['dice']))
+
+
 def build_payload(
     criterion: str,
     best_trial: Dict[str, Any],
@@ -145,11 +161,15 @@ def build_payload(
     top_frac: Optional[float],
     results_dir: Path,
 ) -> Dict[str, Any]:
+    pool = None
     if criterion == DICE_CRITERION:
         metric = 'dice'
         selection_rule = 'max_val_dice_at_checkpoint_epoch'
         value = best_trial['dice']
-        pool = None
+    elif criterion == FPR95_CRITERION:
+        metric = 'fpr95'
+        selection_rule = 'min_val_fpr95_at_checkpoint_epoch'
+        value = best_trial['fpr95']
     else:
         metric = 'fpr95'
         selection_rule = f'min_val_fpr95_among_top_{top_frac:g}_val_dice_at_checkpoint_epoch'
@@ -157,6 +177,7 @@ def build_payload(
         pool = [
             {
                 'trial_name': trial['trial_name'],
+                'loss': _jsonable(trial['loss']),
                 'dice': _jsonable(trial['dice']),
                 'fpr95': _jsonable(trial['fpr95']),
             }
@@ -188,6 +209,65 @@ def build_payload(
     return payload
 
 
+def write_selections_from_trials(
+    trials: List[Dict[str, Any]],
+    results_dir: Path,
+    loss: str,
+    selection_mode: str = 'best',
+    top_frac: float = 0.2,
+    filename_fn=selection_filename,
+    summary_filename: str = SUMMARY_FILENAME,
+    extra_summary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Path]:
+    """Rank already collected trials and write one JSON per criterion.
+
+    Kept separate from ``write_selections`` so that pipelines with another
+    on-disk layout (nnU-Net, see select_nnunet_grid_best.py) can reuse the exact
+    same ranking rules by only providing their own ``collect_trials``.
+    """
+    selections = {
+        DICE_CRITERION: (select_best_dice(trials), None),
+        TOP_DICE_FPR95_CRITERION: (select_best_fpr95_in_top_dice(trials, top_frac), top_frac),
+        FPR95_CRITERION: (select_best_fpr95(trials), None),
+    }
+
+    written: Dict[str, Path] = {}
+    for criterion, (best_trial, criterion_top_frac) in selections.items():
+        payload = build_payload(
+            criterion, best_trial, trials, loss, selection_mode, criterion_top_frac, results_dir
+        )
+        output_path = results_dir / filename_fn(criterion)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+        written[criterion] = output_path
+
+    summary_path = results_dir / summary_filename
+    summary_path.write_text(
+        json.dumps(
+            {
+                'results_dir': str(results_dir),
+                'loss': loss,
+                'selection_mode': selection_mode,
+                'top_frac': top_frac,
+                'num_trials': len(trials),
+                **(extra_summary or {}),
+                'selected': {
+                    criterion: best_trial['trial_name']
+                    for criterion, (best_trial, _) in selections.items()
+                },
+                'trials': [
+                    _jsonable_trial(trial)
+                    for trial in sorted(trials, key=lambda trial: trial['dice'], reverse=True)
+                ],
+            },
+            indent=2,
+        ),
+        encoding='utf-8',
+    )
+    written['summary'] = summary_path
+    return written
+
+
 def write_selections(
     results_dir: Path,
     loss: str,
@@ -210,50 +290,20 @@ def write_selections(
             f'(history_{loss}.json + {checkpoint_filename(loss, selection_mode)} attendus).'
         )
 
-    selections = {
-        DICE_CRITERION: (select_best_dice(trials), None),
-        TOP_DICE_FPR95_CRITERION: (select_best_fpr95_in_top_dice(trials, top_frac), top_frac),
-    }
-
-    written: Dict[str, Path] = {}
-    for criterion, (best_trial, criterion_top_frac) in selections.items():
-        payload = build_payload(
-            criterion, best_trial, trials, loss, selection_mode, criterion_top_frac, results_dir
-        )
-        output_path = results_dir / selection_filename(criterion)
-        output_path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
-        written[criterion] = output_path
-
-    summary_path = results_dir / 'grid_search_selection_summary.json'
-    summary_path.write_text(
-        json.dumps(
-            {
-                'results_dir': str(results_dir),
-                'loss': loss,
-                'selection_mode': selection_mode,
-                'top_frac': top_frac,
-                'num_trials': len(trials),
-                'selected': {
-                    criterion: best_trial['trial_name']
-                    for criterion, (best_trial, _) in selections.items()
-                },
-                'trials': [
-                    _jsonable_trial(trial)
-                    for trial in sorted(trials, key=lambda trial: trial['dice'], reverse=True)
-                ],
-            },
-            indent=2,
-        ),
-        encoding='utf-8',
+    return write_selections_from_trials(
+        trials,
+        results_dir,
+        loss,
+        selection_mode=selection_mode,
+        top_frac=top_frac,
     )
-    written['summary'] = summary_path
-    return written
 
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description='Selectionne les 2 meilleurs essais d une grid search EBO (best Dice, '
-                    'puis best FPR95 parmi les meilleurs Dice).'
+        description='Selectionne les 3 meilleurs essais d une grid search EBO (best Dice, '
+                    'best FPR95 parmi les meilleurs Dice, best FPR95 tous essais '
+                    'confondus).'
     )
     parser.add_argument('--results-dir', type=Path, required=True,
                         help='Dossier de la grid search contenant les trial_*/.')
@@ -262,7 +312,8 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument('--selection-mode', choices=['best', 'last'], default='best',
                         help='best: epoque de best_<loss>.pt (min val loss). last: last_<loss>.pt.')
     parser.add_argument('--top-frac', type=float, default=0.2,
-                        help='Fraction des meilleurs Dice gardee avant de minimiser FPR95.')
+                        help='Fraction des meilleurs Dice gardee avant de minimiser FPR95 '
+                             '(selection dice_top_fpr95 uniquement).')
     parser.add_argument('--expected-epochs', type=int, default=None,
                         help='Ignore les essais dont l historique compte moins d epoques (essais en cours ou plantes).')
     parser.add_argument('--allow-missing-checkpoint', action='store_true',
@@ -286,6 +337,7 @@ def main() -> None:
     for criterion in CRITERIA:
         payload = json.loads(written[criterion].read_text(encoding='utf-8'))
         print(f'[{criterion}] {payload["trial_name"]} '
+              f'loss={payload["val_metrics"].get("loss")} '
               f'dice={payload["val_metrics"].get("dice")} '
               f'fpr95={payload["val_metrics"].get("fpr95")}')
         print(f'  checkpoint: {payload["checkpoint"]}')

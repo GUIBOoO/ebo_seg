@@ -127,16 +127,18 @@ def build_model_acdc(
     raise ValueError(f"Unsupported model: {model_name}")
 
 
-def build_model_brats(
+def build_model_2d(
     model_name: str,
     num_classes: int,
     img_size: int = 256,
     pretrained_path: str | None = None,
     in_channels: int = 4,
 ) -> nn.Module:
-    """BraTS models. `in_channels` is 4 for the raw dataset (extract_data.py) or
-    3 for the T1ce/T2/FLAIR dataset (extract_data_brats3.py), which is what
-    TransUNet's ImageNet-pretrained 3-channel stem requires.
+    """Models for every 2D slice dataset (BraTS, REFUGE, CHAOS, CaDIS).
+
+    `in_channels` is 4 for raw BraTS (extract_data.py), 3 for the T1ce/T2/FLAIR
+    dataset (extract_data_brats3.py) and for the RGB datasets (REFUGE, CaDIS),
+    1 for CHAOS. TransUNet's vendored stem only accepts 1 or 3.
     """
     model_name = model_name.lower()
     out_channels = 1 if num_classes == 1 else num_classes
@@ -144,14 +146,18 @@ def build_model_brats(
     if model_name == "unet":
         return UNet(in_channels=in_channels, out_channels=out_channels)
     if model_name == "transunet":
-        if in_channels != 3:
+        if in_channels not in (1, 3):
             raise ValueError(
-                "TransUNet (vendored R50-ViT-B_16) expects 3-channel input on BraTS, got "
-                f"in_channels={in_channels}. Build the 3-channel dataset with "
+                "TransUNet (vendored R50-ViT-B_16) only accepts 1- or 3-channel input, got "
+                f"in_channels={in_channels}. On BraTS, build the 3-channel dataset with "
                 "extract_data_brats3.py and pass --in-channels 3."
             )
         return build_transunet(
-            num_classes, img_size=img_size, in_channels=3, pretrained_path=pretrained_path
+            num_classes, img_size=img_size, in_channels=in_channels, pretrained_path=pretrained_path
         )
 
     raise ValueError(f"Unsupported model: {model_name}")
+
+
+# Kept so existing imports of the BraTS-specific name keep working.
+build_model_brats = build_model_2d

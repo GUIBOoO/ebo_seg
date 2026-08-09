@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import tqdm
 from torch.utils.data import DataLoader
 
-from datasets import get_dataloaders, infer_dataset_type
+from datasets import SUPPORTED_DATASETS, get_dataloaders, infer_dataset_type, load_dataset_info
 from losses import (
     BoundEBOAugLagLoss,
     BoundEBOAugLogLoss,
@@ -22,7 +22,7 @@ from losses import (
     normalize_loss_name,
 )
 from metrics import EpochStats, compute_binary_metrics, compute_multiclass_metrics
-from models import build_model_acdc, build_model_brats
+from models import build_model_2d, build_model_acdc
 from utils import (
     compute_boundary_mask,
     save_checkpoint,
@@ -300,7 +300,7 @@ def run_epoch(
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Train a modular U-Net for segmentation.')
-    parser.add_argument('--dataset', type=str, choices=['acdc', 'brats'], default=None)
+    parser.add_argument('--dataset', type=str, choices=list(SUPPORTED_DATASETS), default=None)
     parser.add_argument('--dataset-root', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--model', type=str, default='unet')
@@ -315,11 +315,15 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--image-size', type=int, default=256)
     parser.add_argument(
-        '--in-channels', type=int, default=4,
-        help='BraTS input channels: 4 for extract_data.py, 3 (T1ce/T2/FLAIR) for '
-             'extract_data_brats3.py. Ignored for ACDC, which is always 1.',
+        '--in-channels', type=int, default=None,
+        help='Input channels. Defaults to the dataset root dataset_info.json when there is '
+             'one (refuge/cataracts: 3, chaos: 1), else 4 (BraTS from extract_data.py; use 3 '
+             'for extract_data_brats3.py). Ignored for ACDC, which is always 1.',
     )
-    parser.add_argument('--num-classes', type=int, default=1)
+    parser.add_argument(
+        '--num-classes', type=int, default=None,
+        help='Defaults to the dataset root dataset_info.json when there is one, else 1.',
+    )
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--lambda-ebo-in', type=float, default=0.1)
@@ -363,6 +367,14 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     dataset_name = infer_dataset_type(base_dir=args.dataset_root, dataset=args.dataset)
 
+    # extract_data_*.py records in_channels / num_classes next to the slices, so
+    # a new dataset trains without spelling them out; explicit flags still win.
+    dataset_info = load_dataset_info(args.dataset_root)
+    if args.in_channels is None:
+        args.in_channels = int(dataset_info.get('in_channels', 4))
+    if args.num_classes is None:
+        args.num_classes = int(dataset_info.get('num_classes', 1))
+
     resize_to = args.image_size if args.model.lower() == 'transunet' else None
     train_loader, val_loader, _ = get_dataloaders(
         dataset=dataset_name,
@@ -377,7 +389,7 @@ def main() -> None:
             args.model, args.num_classes, img_size=args.image_size, pretrained_path=pretrained_path,
         ).to(device)
     else:
-        model = build_model_brats(
+        model = build_model_2d(
             args.model, args.num_classes, img_size=args.image_size, pretrained_path=pretrained_path,
             in_channels=args.in_channels,
         ).to(device)
@@ -406,6 +418,9 @@ def main() -> None:
 
     print(f'Device: {device}')
     print(f'Dataset: {dataset_name}')
+    if dataset_info:
+        print(f'Dataset info: {dataset_info.get("labels", {})}')
+    print(f'Classes: {args.num_classes}')
     print(f'Model: {args.model}')
     if dataset_name != 'acdc':
         print(f'Input channels: {args.in_channels}')

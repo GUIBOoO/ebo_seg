@@ -13,7 +13,11 @@ from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
-from metrics import compute_binary_metrics, compute_multiclass_metrics
+from metrics import (
+    compute_binary_metrics,
+    compute_multiclass_metrics,
+    hausdorff_distance_95_from_preds,
+)
 from nnunet_split_utils import sync_split_files
 from utils import SIRC, doctor, energy, load_d_matrix, relu_score
 
@@ -240,6 +244,7 @@ def _append_segmentation_metrics(
     valid: torch.Tensor,
     num_classes: int,
     seg_metrics: dict[str, list[float]],
+    hd95_counts: dict[str, int],
 ) -> None:
     target_batched = target.unsqueeze(0)
     valid_mask = valid.unsqueeze(0)
@@ -258,6 +263,22 @@ def _append_segmentation_metrics(
         seg_metrics["iou"].append(iou)
         seg_metrics["pixel_acc"].append(pixel_acc)
 
+    # HD95 needs the spatial layout, so the invalid pixels (nnU-Net marks the
+    # region outside the cropped nonzero box with -1) cannot be indexed away:
+    # they are folded into the background instead. Distances are in pixels of
+    # the preprocessed grid, foreground classes only, exactly like inference.py.
+    preds = logits.argmax(1) if num_classes > 1 else (torch.sigmoid(logits[:, 0]) > 0.5).long()
+    preds = torch.where(valid_mask, preds, torch.zeros_like(preds))
+    targets_hd95 = torch.where(valid_mask, target_batched, torch.zeros_like(target_batched))
+
+    hd95, num_defined, num_undefined = hausdorff_distance_95_from_preds(
+        preds, targets_hd95, num_classes
+    )
+    hd95_counts["defined"] += num_defined
+    hd95_counts["undefined"] += num_undefined
+    if not np.isnan(hd95):
+        seg_metrics["hd95"].append(hd95)
+
 
 def append_2d_case_scores(
     network: torch.nn.Module,
@@ -270,6 +291,7 @@ def append_2d_case_scores(
     all_scores: dict[str, list[np.ndarray]],
     all_errors: list[np.ndarray],
     seg_metrics: dict[str, list[float]],
+    hd95_counts: dict[str, int],
     d_matrix: torch.Tensor | None = None,
     patch_size: tuple[int, ...] | None = None,
 ) -> None:
@@ -295,7 +317,7 @@ def append_2d_case_scores(
             all_scores[name].append(score[0][valid].detach().cpu().numpy().reshape(-1))
         all_errors.append(error.reshape(-1))
 
-        _append_segmentation_metrics(logits, target, valid, num_classes, seg_metrics)
+        _append_segmentation_metrics(logits, target, valid, num_classes, seg_metrics, hd95_counts)
 
 
 def append_nd_case_scores(
@@ -309,6 +331,7 @@ def append_nd_case_scores(
     all_scores: dict[str, list[np.ndarray]],
     all_errors: list[np.ndarray],
     seg_metrics: dict[str, list[float]],
+    hd95_counts: dict[str, int],
     d_matrix: torch.Tensor | None = None,
     patch_size: tuple[int, ...] | None = None,
 ) -> None:
@@ -326,7 +349,7 @@ def append_nd_case_scores(
         all_scores[name].append(score[0][valid].detach().cpu().numpy().reshape(-1))
     all_errors.append(error.reshape(-1))
 
-    _append_segmentation_metrics(logits, target, valid, num_classes, seg_metrics)
+    _append_segmentation_metrics(logits, target, valid, num_classes, seg_metrics, hd95_counts)
 
 
 def main() -> None:
@@ -363,7 +386,8 @@ def main() -> None:
 
     all_scores = {name: [] for name in resolved_score_names}
     all_errors = []
-    seg_metrics = {"dice": [], "iou": [], "pixel_acc": []}
+    seg_metrics = {"dice": [], "iou": [], "pixel_acc": [], "hd95": []}
+    hd95_counts = {"defined": 0, "undefined": 0}
 
     print(f"Model folder : {model_folder}")
     print(f"Checkpoint   : fold_{fold}/{checkpoint_name}")
@@ -381,12 +405,12 @@ def main() -> None:
             if configuration == "2d":
                 append_2d_case_scores(
                     predictor.network, data, seg, device, num_classes, args.temperature, divisor,
-                    all_scores, all_errors, seg_metrics, d_matrix, patch_size,
+                    all_scores, all_errors, seg_metrics, hd95_counts, d_matrix, patch_size,
                 )
             else:
                 append_nd_case_scores(
                     predictor.network, data, seg, device, num_classes, args.temperature, divisor,
-                    all_scores, all_errors, seg_metrics, d_matrix, patch_size,
+                    all_scores, all_errors, seg_metrics, hd95_counts, d_matrix, patch_size,
                 )
 
     labels = np.concatenate(all_errors).astype(np.uint8)
@@ -405,6 +429,10 @@ def main() -> None:
         name: (float(np.mean(values)) if values else float("nan"))
         for name, values in seg_metrics.items()
     }
+    # (slice, class) pairs where the class is absent from the prediction or from
+    # the ground truth have no HD95 and are skipped; the counts say how often.
+    segmentation_metrics["hd95_num_defined_pairs"] = hd95_counts["defined"]
+    segmentation_metrics["hd95_num_undefined_pairs"] = hd95_counts["undefined"]
 
     payload = {
         "best_json": str(args.best_json) if args.best_json else None,

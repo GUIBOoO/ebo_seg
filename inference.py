@@ -13,7 +13,7 @@ import torch
 import tqdm
 from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 
-from datasets import get_dataloaders, infer_dataset_type
+from datasets import SUPPORTED_DATASETS, get_dataloaders, infer_dataset_type
 from metrics import (
     compute_binary_metrics,
     compute_binary_metrics_from_preds,
@@ -21,7 +21,7 @@ from metrics import (
     compute_multiclass_metrics_from_preds,
     hausdorff_distance_95_from_preds,
 )
-from models import build_model_acdc, build_model_brats
+from models import build_model_2d, build_model_acdc
 from utils import SIRC, doctor, energy, hybrid_energy, load_d_matrix, relu_score
 
 
@@ -56,7 +56,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset",
         type=str,
-        choices=["acdc", "brats"],
+        choices=list(SUPPORTED_DATASETS),
         default=None,
         help="Dataset name. If omitted, inferred from the checkpoint args or dataset root.",
     )
@@ -181,7 +181,7 @@ def load_checkpoint_model(
     if dataset_name == "acdc":
         model = build_model_acdc(model_name, num_classes, img_size=img_size)
     else:
-        model = build_model_brats(model_name, num_classes, img_size=img_size, in_channels=in_channels)
+        model = build_model_2d(model_name, num_classes, img_size=img_size, in_channels=in_channels)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device).eval()
     return model, train_args
@@ -402,6 +402,7 @@ def save_metrics(segmentation_metrics: dict, score_arrays: Dict[str, np.ndarray]
         "num_error_pixels": int(score_arrays["labels"].sum()),
     }
 
+    output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.json"
     with metrics_path.open("w", encoding="utf-8") as file_obj:
         json.dump(payload, file_obj, indent=2)
@@ -601,6 +602,9 @@ def main() -> None:
         "energy_threshold": args.energy_threshold,
         "msp_threshold": args.msp_threshold,
     }
+    # Inference can take minutes; recreate the directory in case it was removed
+    # in the meantime, rather than losing the whole pass on a write error.
+    output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "run_config.json").open("w", encoding="utf-8") as file_obj:
         json.dump(run_metadata, file_obj, indent=2)
 
