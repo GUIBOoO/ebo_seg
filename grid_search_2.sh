@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --time=24:00:00
-#SBATCH --array=0-23
+#SBATCH --array=0-8
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --output=/scratch/guibo/slurm_outputs/slurm-%j.out
@@ -15,7 +15,7 @@ source /home/guibo/ebo-seg/bin/activate
 set -euo pipefail
 
 ROOT_DIR="/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg"
-DATASET="${DATASET:-acdc}"
+DATASET="${DATASET:-cataracts}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 # DATASET_ARG is what grid_search.py / train_unet.py accept; brats3 uses the same
@@ -100,9 +100,9 @@ fi
 export PYTHON_DATA_DIR="$DATA_DIR"
 PYTHON_SCRIPT="${PYTHON_SCRIPT:-grid_search.py}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
-MODEL="${MODEL:-transunet}"
+MODEL="${MODEL:-unet}"
 MODEL_LOWER=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')
-LOSS="${LOSS:-bound_ebo_ce}"
+LOSS="${LOSS:-ebo_ce}"
 OUTPUT_DIR="${OUTPUT_DIR:-$SCRATCH/grid_search/$MODEL_LOWER/$DATASET_LOWER/$LOSS}"
 EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"

@@ -15,7 +15,7 @@ source /home/guibo/ebo-seg/bin/activate
 set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg}"
-DATASET="${DATASET:-brats3}"
+DATASET="${DATASET:-cataracts}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 # DATASET_ARG is what inference.py's --dataset accepts; brats3 is the same

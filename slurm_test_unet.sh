@@ -14,7 +14,7 @@ source /home/guibo/ebo-seg/bin/activate
 
 set -euo pipefail
 
-DATASET="${DATASET:-acdc}"
+DATASET="${DATASET:-refuge}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 # DATASET_ARG is what inference.py's --dataset accepts; brats3 is the same

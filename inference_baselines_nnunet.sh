@@ -25,7 +25,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 
 export nnUNet_raw="${nnUNet_raw:-/scratch/$USER/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-/scratch/$USER/nnUNet_preprocessed}"
-NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search}"
+NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 
 # DATASET: acdc, brats, or all (both, in sequence).
@@ -33,10 +33,11 @@ DATASET="${DATASET:-all}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 case "$DATASET_LOWER" in
-  acdc|brats) DATASETS=("$DATASET_LOWER") ;;
-  all)        DATASETS=(acdc brats) ;;
+  acdc|brats|refuge|cataracts|chaos_mr) DATASETS=("$DATASET_LOWER") ;;
+  all)        DATASETS=(acdc brats refuge cataracts chaos_mr) ;;
   *)
-    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats' or 'all'."
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats', 'refuge',"
+    echo "       'cataracts', 'chaos_mr' or 'all'."
     exit 1
     ;;
 esac
@@ -67,8 +68,11 @@ SKIP_EXISTING="${SKIP_EXISTING:-0}"
 
 dataset_id_for() {
     case "$1" in
-      acdc)  echo 1 ;;
-      brats) echo 2 ;;
+      acdc)     echo 1 ;;
+      brats)    echo 2 ;;
+      refuge)   echo 4 ;;
+      cataracts) echo 5 ;;
+      chaos_mr) echo 6 ;;
     esac
 }
 
@@ -113,6 +117,20 @@ for ds in "${DATASETS[@]}"; do
     dataset_name=$(basename "$dataset_dir")
     model_folder="$dataset_dir/${TRAINER}__${PLANS}__${CONFIGURATION}"
 
+    # nnU-Net names the folder after the trainer class, never after the loss: a
+    # CE+Dice baseline trained through train_nnunet.sh keeps that script's
+    # TRAINER default (BoundEBOLogBarrierTrainer with NNUNET_EBO_LOSS=ce_dice).
+    # When the requested trainer is absent but the dataset has exactly one model
+    # folder, take it instead of failing.
+    if [ ! -d "$model_folder" ]; then
+        candidates=("$dataset_dir"/*__"${PLANS}"__"${CONFIGURATION}")
+        if [ "${#candidates[@]}" -eq 1 ] && [ -d "${candidates[0]}" ]; then
+            echo "NOTE: ${TRAINER}__${PLANS}__${CONFIGURATION} not found; using the only"
+            echo "      model folder of this dataset: $(basename "${candidates[0]}")"
+            model_folder="${candidates[0]}"
+        fi
+    fi
+
     if [ ! -d "$model_folder" ]; then
         echo "ERROR: baseline model folder not found: $model_folder"
         echo "Available under $dataset_dir:"
@@ -126,7 +144,9 @@ for ds in "${DATASETS[@]}"; do
         continue
     fi
 
-    subdir="${TRAINER}__${PLANS}__${CONFIGURATION}"
+    # Named after the folder actually used, so the D matrix lookup below and the
+    # output directory stay consistent when the fallback above kicked in.
+    subdir="$(basename "$model_folder")"
     output_dir="$OUTPUT_ROOT/$ds/$subdir"
     metrics_file="$output_dir/metrics.json"
 

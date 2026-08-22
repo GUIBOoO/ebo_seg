@@ -90,7 +90,7 @@ DATASET_ROOT="${DATASET_ROOT:-$DATA_DIR}"
 # MODEL only picks the default checkpoint/output paths. The architecture,
 # image_size and in_channels are read back from the checkpoint by d_matrix.py,
 # so a TransUNet checkpoint is rebuilt with the geometry it was trained on.
-MODEL="${MODEL:-unet}"
+MODEL="${MODEL:-transunet}"
 MODEL_LOWER=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')
 
 CHECKPOINT=${CHECKPOINT:-"$SCRATCH/models/ebo_seg/$MODEL_LOWER/$DATASET_ARG/best_ce_dice.pt"}

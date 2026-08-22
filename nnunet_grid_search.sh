@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=01:00:00
+#SBATCH --time=24:00:00
 #SBATCH --array=0
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -14,7 +14,27 @@ module load python/3.10.13
 source ~/nnunet/bin/activate
 
 ROOT_DIR="${ROOT_DIR:-/home/guibo/links/projects/rrg-josedolz/guibo/ebo_seg}"
-DATASET_ID="${DATASET_ID:-2}"
+# DATASET picks the nnU-Net dataset id and the default results directory.
+#   acdc      -> Dataset001_ACDC      (extract_data_acdc.py)
+#   brats     -> Dataset002_BraTS2D   (extract_data_brats.py)
+#   refuge    -> Dataset004_REFUGE    (extract_data_refuge_nnunet.py)
+#   cataracts -> Dataset005_CaDIS     (extract_data_cataracts_nnunet.py)
+#   chaos_mr  -> Dataset006_CHAOSMR   (extract_data_chaos_mr_nnunet.py)
+DATASET="${DATASET:-refuge}"
+DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
+case "$DATASET_LOWER" in
+  acdc)      DEFAULT_DATASET_ID=1 ;;
+  brats)     DEFAULT_DATASET_ID=2 ;;
+  refuge)    DEFAULT_DATASET_ID=4 ;;
+  cataracts) DEFAULT_DATASET_ID=5 ;;
+  chaos_mr)  DEFAULT_DATASET_ID=6 ;;
+  *)
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats', 'refuge',"
+    echo "       'cataracts' or 'chaos_mr'."
+    exit 1
+    ;;
+esac
+DATASET_ID="${DATASET_ID:-$DEFAULT_DATASET_ID}"
 CONFIGURATION="${CONFIGURATION:-2d}"
 FOLD="${FOLD:-0}"
 PLANS="${PLANS:-nnUNetPlans}"
@@ -31,7 +51,7 @@ NNUNET_FPR95_EVERY_EPOCH="${NNUNET_FPR95_EVERY_EPOCH:-0}"
 
 export nnUNet_raw="${nnUNet_raw:-/scratch/$USER/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-/scratch/$USER/nnUNet_preprocessed}"
-NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/boundebo/brats}"
+NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/boundebo/$DATASET_LOWER}"
 export nnUNet_compile="${nnUNet_compile:-False}"
 export nnUNet_extTrainer="${nnUNet_extTrainer:-$ROOT_DIR/nnunet_ext_trainers}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
@@ -242,7 +262,7 @@ python -c "from nnunet_split_utils import sync_split_files_by_id; sync_split_fil
 
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
 echo "Task           : $TASK_ID / $TOTAL"
-echo "Dataset ID     : $DATASET_ID"
+echo "Dataset        : $DATASET_LOWER (Dataset$(printf '%03d' "$DATASET_ID"))"
 echo "Configuration  : $CONFIGURATION"
 echo "Fold           : $FOLD"
 echo "Fold mode      : single fold only"

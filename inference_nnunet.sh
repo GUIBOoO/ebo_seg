@@ -18,10 +18,25 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 
 export nnUNet_raw="${nnUNet_raw:-/scratch/$USER/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-/scratch/$USER/nnUNet_preprocessed}"
-NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/boundebo/brats}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-/scratch/$USER/nnUNet_inference_grid_search/boundebo/brats}"
+# DATASET picks the grid-search results and the default output directory.
+#   acdc -> Dataset001_ACDC, brats -> Dataset002_BraTS2D,
+#   refuge -> Dataset004_REFUGE, cataracts -> Dataset005_CaDIS,
+#   chaos_mr -> Dataset006_CHAOSMR
+DATASET="${DATASET:-refuge}"
+DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
+case "$DATASET_LOWER" in
+  acdc|brats|refuge|cataracts|chaos_mr) ;;
+  *)
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats', 'refuge',"
+    echo "       'cataracts' or 'chaos_mr'."
+    exit 1
+    ;;
+esac
+
+NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search/boundebo/$DATASET_LOWER}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/scratch/$USER/nnUNet_inference_grid_search/boundebo/$DATASET_LOWER}"
 DEVICE="${DEVICE:-cuda}"
 TILE_STEP_SIZE="${TILE_STEP_SIZE:-0.5}"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
@@ -84,6 +99,7 @@ mkdir -p "$OUTPUT_ROOT"
 cd "$ROOT_DIR"
 
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-local}"
+echo "Dataset        : $DATASET_LOWER"
 echo "Results base   : $NNUNET_RESULTS_BASE"
 echo "Output root    : $OUTPUT_ROOT"
 echo "Checkpoint name: $CHECKPOINT_NAME"

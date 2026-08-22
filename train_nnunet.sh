@@ -19,7 +19,7 @@ export nnUNet_compile="${nnUNet_compile:-False}"
 export nnUNet_extTrainer="${nnUNet_extTrainer:-$ROOT_DIR/nnunet_ext_trainers}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 
-DATASET_ID="${DATASET_ID:-1}"
+DATASET_ID="${DATASET_ID:-6}"
 CONFIGURATION="${CONFIGURATION:-2d}"
 FOLD="${FOLD:-${SLURM_ARRAY_TASK_ID:-0}}"
 TRAINER="${TRAINER:-BoundEBOLogBarrierTrainer}"

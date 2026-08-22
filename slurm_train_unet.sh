@@ -14,7 +14,7 @@ source /home/guibo/ebo-seg/bin/activate
 
 set -euo pipefail
 
-DATASET="${DATASET:-cataracts}"
+DATASET="${DATASET:-refuge}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 # DATASET_ARG is what train_unet.py's --dataset accepts; brats3 is the same
@@ -102,9 +102,11 @@ find "$DATA_DIR" -maxdepth 1 -type d
 export PYTHON_DATA_DIR="$DATA_DIR"
 DATASET_ROOT="${DATASET_ROOT:-$DATA_DIR}"
 
-OUTPUT_DIR="${OUTPUT_DIR:-/home/guibo/links/scratch/models/ebo_seg/unet/cataracts}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
-MODEL="${MODEL:-unet}"
+MODEL="${MODEL:-transunet}"
+
+
+OUTPUT_DIR="${OUTPUT_DIR:-/home/guibo/links/scratch/models/ebo_seg/$MODEL/$DATASET_ARG}"
 PRETRAINED_PATH="${PRETRAINED_PATH:-/home/guibo/links/scratch/pretrained/transunet/R50+ViT-B_16.npz}"
 EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"

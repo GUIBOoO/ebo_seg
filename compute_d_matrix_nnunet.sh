@@ -18,18 +18,22 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 
 export nnUNet_raw="${nnUNet_raw:-/scratch/$USER/nnUNet_raw}"
 export nnUNet_preprocessed="${nnUNet_preprocessed:-/scratch/$USER/nnUNet_preprocessed}"
-NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results_grid_search}"
+NNUNET_RESULTS_BASE="${NNUNET_RESULTS_BASE:-/scratch/$USER/nnUNet_results}"
 export PYTHONPATH="$ROOT_DIR:${PYTHONPATH:-}"
 
 # DATASET selects the nnU-Net dataset directory (and the default output dir).
-DATASET="${DATASET:-brats}"
+DATASET="${DATASET:-refuge}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 case "$DATASET_LOWER" in
-  acdc)  DEFAULT_DATASET_ID=1 ;;
-  brats) DEFAULT_DATASET_ID=2 ;;
+  acdc)      DEFAULT_DATASET_ID=1 ;;
+  brats)     DEFAULT_DATASET_ID=2 ;;
+  refuge)    DEFAULT_DATASET_ID=4 ;;
+  cataracts) DEFAULT_DATASET_ID=5 ;;
+  chaos_mr)  DEFAULT_DATASET_ID=6 ;;
   *)
-    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc' or 'brats'."
+    echo "ERROR: unsupported dataset '$DATASET'. Expected 'acdc', 'brats', 'refuge',"
+    echo "       'cataracts' or 'chaos_mr'."
     exit 1
     ;;
 esac
@@ -94,6 +98,20 @@ case "$MODE" in
     if [ -z "$MODEL_FOLDER" ]; then
         dataset_dir=$(resolve_dataset_dir "$BASELINE_ROOT") || exit 1
         MODEL_FOLDER="$dataset_dir/${TRAINER}__${PLANS}__${CONFIGURATION}"
+
+        # nnU-Net names the folder after the trainer class, never after the
+        # loss: a CE+Dice baseline trained through train_nnunet.sh keeps that
+        # script's TRAINER default (BoundEBOLogBarrierTrainer with
+        # NNUNET_EBO_LOSS=ce_dice). When the requested trainer is absent but the
+        # dataset has exactly one model folder, take it instead of failing.
+        if [ ! -d "$MODEL_FOLDER" ]; then
+            candidates=("$dataset_dir"/*__"${PLANS}"__"${CONFIGURATION}")
+            if [ "${#candidates[@]}" -eq 1 ] && [ -d "${candidates[0]}" ]; then
+                echo "NOTE: ${TRAINER}__${PLANS}__${CONFIGURATION} not found; using the only"
+                echo "      model folder of this dataset: $(basename "${candidates[0]}")"
+                MODEL_FOLDER="${candidates[0]}"
+            fi
+        fi
     fi
     if [ ! -d "$MODEL_FOLDER" ]; then
         echo "ERROR: baseline model folder not found: $MODEL_FOLDER"
