@@ -27,6 +27,10 @@ from utils import SIRC, doctor, energy, hybrid_energy, load_d_matrix, relu_score
 
 BASE_SCORE_NAMES = ("msp", "alpha", "beta", "energy", "hybrid_energy", "sirc")
 
+# Scores plotted on a fixed x-range so distributions stay comparable across
+# runs, datasets and models instead of being auto-scaled to each run's spread.
+FIXED_SCORE_XLIM: Dict[str, Tuple[float, float]] = {"energy": (-80.0, 0.0)}
+
 
 def resolve_score_names(d_matrix: torch.Tensor | None) -> Tuple[str, ...]:
     """RELU needs a precomputed D matrix, so it is only scored when one is given."""
@@ -443,6 +447,9 @@ def save_distributions(score_arrays: Dict[str, np.ndarray], output_dir: Path, ma
         plt.title(f"Distribution - {name.upper()}")
         plt.xlabel("Score")
         plt.ylabel("Density")
+        xlim = FIXED_SCORE_XLIM.get(name)
+        if xlim is not None:
+            plt.xlim(*xlim)
         save_path = distribution_dir / f"distribution_{name}.png"
         plt.tight_layout()
         plt.savefig(save_path)
@@ -461,37 +468,31 @@ def save_visualizations(
     vis_dir = output_dir / "visualizations"
     vis_dir.mkdir(parents=True, exist_ok=True)
 
-    score_order = ["msp", "alpha", "beta", "energy", "hybrid_energy", "sirc", "relu"]
     for sample in list(per_sample)[:num_samples]:
         image = _to_numpy_image(sample["image"])
-        mask = sample["mask"].numpy()
         pred = sample["pred"].numpy()
         error = sample["error"].numpy()
 
-        fig, axes = plt.subplots(3, 4, figsize=(20, 12))
-        axes = axes.flatten()
+        energy = sample["scores"]["energy"].numpy()
+
+        fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
         axes[0].imshow(image, cmap="gray" if image.ndim == 2 else None)
         axes[0].set_title("Image")
 
-        axes[1].imshow(mask, cmap="tab20")
-        axes[1].set_title("Mask")
+        axes[1].imshow(pred, cmap="tab20")
+        axes[1].set_title("Prediction")
 
-        axes[2].imshow(pred, cmap="tab20")
-        axes[2].set_title("Prediction")
+        axes[2].imshow(error, cmap="gray_r")
+        axes[2].set_title("Error")
 
-        axes[3].imshow(error, cmap="gray_r")
-        axes[3].set_title("Error")
+        axes[3].imshow(energy, cmap="viridis")
+        axes[3].set_title("Energy")
 
-        available = [name for name in score_order if name in sample["scores"]]
-        for axis, score_name in zip(axes[4:10], available):
-            axis.imshow(sample["scores"][score_name].numpy(), cmap="viridis")
-            axis.set_title(score_name.upper())
+        for axis in axes:
+            axis.axis("off")
 
-        energy = sample["scores"]["energy"].numpy()
-        rejected_energy = energy < energy_threshold
         msp = -sample["scores"]["msp"].numpy()
-        rejected_msp = msp > msp_threshold
         error_pixels = error.astype(bool)
         correct_pixels = ~error_pixels
         summary_energy_detected = energy > -5.0
@@ -504,12 +505,6 @@ def save_visualizations(
         rejection_summary[error_pixels & summary_energy_detected] = (0.90, 0.10, 0.10)
         rejection_summary[error_pixels & summary_msp_detected] = (0.10, 0.35, 0.95)
         rejection_summary[error_pixels & summary_energy_detected & summary_msp_detected] = (1.00, 0.90, 0.05)
-
-        axes[10].imshow(rejected_energy.astype(np.uint8), cmap="gray")
-        axes[10].set_title(f"Energy < {energy_threshold}")
-
-        axes[11].imshow(rejected_msp.astype(np.uint8), cmap="gray")
-        axes[11].set_title(f"MSP > {msp_threshold}")
 
         legend_handles = [
             Patch(color=(0.90, 0.10, 0.10), label="Error: energy"),

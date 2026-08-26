@@ -14,7 +14,7 @@ source /home/guibo/ebo-seg/bin/activate
 
 set -euo pipefail
 
-DATASET="${DATASET:-refuge}"
+DATASET="${DATASET:-brats}"
 DATASET_LOWER=$(printf '%s' "$DATASET" | tr '[:upper:]' '[:lower:]')
 
 # DATASET_ARG is what inference.py's --dataset accepts; brats3 is the same
@@ -90,7 +90,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 # MODEL only picks the default checkpoint/output paths. inference.py rebuilds the
 # architecture from the checkpoint's own args (model, image_size, in_channels),
 # so a TransUNet checkpoint is restored with the geometry it was trained on.
-MODEL="${MODEL:-transunet}"
+MODEL="${MODEL:-unet}"
 MODEL_LOWER=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')
 
 if [ "$MODEL_LOWER" = "transunet" ] && [ "$DATASET_LOWER" = "brats" ]; then

@@ -91,9 +91,9 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 # MODEL only picks the default paths. inference.py rebuilds the architecture from
 # the checkpoint's own args (model, image_size, in_channels), so a TransUNet
 # checkpoint is restored with the geometry it was trained on.
-MODEL="${MODEL:-transunet}"
+MODEL="${MODEL:-unet}"
 MODEL_LOWER=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')
-LOSS="${LOSS:-bound_ebo_ce}"
+LOSS="${LOSS:-ebo_ce}"
 
 if [ "$MODEL_LOWER" = "transunet" ] && [ "$DATASET_LOWER" = "brats" ]; then
     echo "ERROR: TransUNet's pretrained stem takes 3 channels; raw BraTS has 4."
@@ -156,7 +156,7 @@ ENERGY_THRESH="${ENERGY_THRESH:--5}"
 MSP_THRESH="${MSP_THRESH:-0.999}"
 MODES="${MODES:-all}"
 TRIAL_FILTER="${TRIAL_FILTER:-}"
-SKIP_EXISTING="${SKIP_EXISTING:-1}"
+SKIP_EXISTING="${SKIP_EXISTING:-0}"
 
 # The D matrix is fitted on one checkpoint, so each selection needs its own.
 # D_MATRIX stays as a fallback for when several selections land on the same trial.
