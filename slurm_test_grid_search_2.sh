@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --partition=compute_full_node
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
@@ -101,9 +101,11 @@ if [ "$MODEL_LOWER" = "transunet" ] && [ "$DATASET_LOWER" = "brats" ]; then
     exit 1
 fi
 
-MODEL_ROOT="${MODEL_ROOT:-$SCRATCH/grid_search/$MODEL_LOWER/$DATASET_LOWER/$LOSS}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRATCH/inference/$MODEL_LOWER/$DATASET_LOWER/grid_search_$LOSS}"
+# MODEL_ROOT="${MODEL_ROOT:-$SCRATCH/grid_search/$MODEL_LOWER/$DATASET_LOWER/$LOSS}"
+MODEL_ROOT="${MODEL_ROOT:-$SCRATCH/grid_search/$MODEL_LOWER/$DATASET_LOWER/ablation_k}"
 
+# OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRATCH/inference/$MODEL_LOWER/$DATASET_LOWER/grid_search_$LOSS}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$SCRATCH/inference/$MODEL_LOWER/$DATASET_LOWER/ablation_k}"
 # Three independent ways of picking the winner of the grid search, all written by
 # select_grid_best.py:
 #   dice           - best validation Dice.
@@ -140,6 +142,11 @@ case "$SELECTION" in
     ;;
 esac
 
+# ALL_TRIALS=1 ignores the selection entirely and tests every trial_* directory
+# under MODEL_ROOT, one output dir per trial. Meant for ablations, where the
+# point is the whole sweep and not its winner.
+ALL_TRIALS="${ALL_TRIALS:-1}"
+
 # BEST_CONFIG_JSON only makes sense when a single criterion is requested.
 BEST_CONFIG_JSON="${BEST_CONFIG_JSON:-}"
 if [ -n "$BEST_CONFIG_JSON" ] && [ "${#criteria[@]}" -ne 1 ]; then
@@ -147,13 +154,29 @@ if [ -n "$BEST_CONFIG_JSON" ] && [ "${#criteria[@]}" -ne 1 ]; then
     echo "       SELECTION=dice_top_fpr95 or SELECTION=fpr95."
     exit 1
 fi
+if [ "$ALL_TRIALS" = "1" ] && [ -n "$BEST_CONFIG_JSON" ]; then
+    echo "ERROR: ALL_TRIALS=1 and BEST_CONFIG_JSON are mutually exclusive."
+    exit 1
+fi
 BATCH_SIZE="${BATCH_SIZE:-4}"
 DEVICE="${DEVICE:-cuda}"
 NUM_SAMPLES="${NUM_SAMPLES:-4}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 MAX_PIXELS_KDE="${MAX_PIXELS_KDE:-200000}"
-ENERGY_THRESH="${ENERGY_THRESH:--5}"
+# 'auto' puts the energy cut on the same operating point as every other score,
+# i.e. the energy value flagging SCORE_TPR of the errors. A number keeps a fixed
+# absolute cut instead, as before (ENERGY_THRESH=-5).
+ENERGY_THRESH="${ENERGY_THRESH:-auto}"
 MSP_THRESH="${MSP_THRESH:-0.999}"
+# segmentation.score_thresholds: operating point shared by every score (energy,
+# msp, alpha, beta, sirc, hybrid_energy, relu). SCORE_THRESHOLDS pins a score to
+# an absolute value instead, space separated, e.g. SCORE_THRESHOLDS="sirc=2.5 alpha=-1".
+SCORE_TPR="${SCORE_TPR:-0.95}"
+SCORE_THRESHOLDS="${SCORE_THRESHOLDS:-}"
+score_threshold_args=()
+for score_spec in $SCORE_THRESHOLDS; do
+    score_threshold_args+=(--score-threshold "$score_spec")
+done
 MODES="${MODES:-all}"
 TRIAL_FILTER="${TRIAL_FILTER:-}"
 SKIP_EXISTING="${SKIP_EXISTING:-0}"
@@ -183,17 +206,24 @@ echo "Loss           : ${LOSS}"
 echo "Model root     : ${MODEL_ROOT}"
 echo "Output root    : ${OUTPUT_ROOT}"
 echo "Checkpoint name: ${CHECKPOINT_NAME}"
-echo "Selections     : ${criteria[*]} (top-frac ${TOP_FRAC})"
+if [ "$ALL_TRIALS" = "1" ]; then
+    echo "Selections     : <none, ALL_TRIALS=1>"
+else
+    echo "Selections     : ${criteria[*]} (top-frac ${TOP_FRAC})"
+fi
 echo "Modes          : ${MODES}"
 echo "Trial filter   : ${TRIAL_FILTER:-<none>}"
 
-# Rebuild both selection JSONs when at least one is missing.
+# Rebuild both selection JSONs when at least one is missing. ALL_TRIALS=1 never
+# looks at them, so there is nothing to rebuild.
 need_selection=0
-for criterion in "${criteria[@]}"; do
-    if [ -z "$BEST_CONFIG_JSON" ] && [ ! -f "$MODEL_ROOT/grid_search_best_${criterion}.json" ]; then
-        need_selection=1
-    fi
-done
+if [ "$ALL_TRIALS" != "1" ]; then
+    for criterion in "${criteria[@]}"; do
+        if [ -z "$BEST_CONFIG_JSON" ] && [ ! -f "$MODEL_ROOT/grid_search_best_${criterion}.json" ]; then
+            need_selection=1
+        fi
+    done
+fi
 
 if [ "$need_selection" = "1" ]; then
     if [ "$AUTO_SELECT" != "1" ]; then
@@ -217,6 +247,128 @@ fi
 read_json_field() {
     "$PYTHON_BIN" -c 'import json, sys; from pathlib import Path; print(json.loads(Path(sys.argv[1]).read_text()).get(sys.argv[2], "") or "")' "$1" "$2"
 }
+
+# Single place where inference.py is called, shared by the selection loop and by
+# ALL_TRIALS. Returns 1 without running when SKIP_EXISTING hides the trial.
+run_trial_inference() {
+    local trial_name="$1"
+    local checkpoint_path="$2"
+    local output_dir="$3"
+    local trial_d_matrix="$4"
+
+    if [ "$SKIP_EXISTING" = "1" ] && [ -f "$output_dir/metrics.json" ]; then
+        echo "[SKIP] $trial_name: existing metrics found at $output_dir/metrics.json"
+        return 1
+    fi
+
+    local d_matrix_args=()
+    if [ -n "$trial_d_matrix" ]; then
+        d_matrix_args+=(--d-matrix "$trial_d_matrix")
+    fi
+
+    echo "Checkpoint: $checkpoint_path"
+    echo "Output    : $output_dir"
+    echo "D matrix  : ${trial_d_matrix:-none (RELU score disabled)}"
+    echo "============================================================"
+
+    "$PYTHON_BIN" inference.py ${MODES} \
+      --checkpoint "$checkpoint_path" \
+      --dataset "$DATASET_ARG" \
+      --dataset-root "$DATASET_ROOT" \
+      --output-dir "$output_dir" \
+      --batch-size "$BATCH_SIZE" \
+      --device "$DEVICE" \
+      --num-samples "$NUM_SAMPLES" \
+      --temperature "$TEMPERATURE" \
+      --max-pixels-kde "$MAX_PIXELS_KDE" \
+      --energy-threshold "$ENERGY_THRESH" \
+      --msp-threshold "$MSP_THRESH" \
+      --score-tpr "$SCORE_TPR" \
+      "${score_threshold_args[@]}" \
+      "${d_matrix_args[@]}"
+}
+
+if [ "$ALL_TRIALS" = "1" ]; then
+    shopt -s nullglob
+    all_trial_dirs=("$MODEL_ROOT"/trial_*/)
+    shopt -u nullglob
+
+    if [ "${#all_trial_dirs[@]}" -eq 0 ]; then
+        echo "ERROR: no trial_* directory under $MODEL_ROOT"
+        exit 1
+    fi
+
+    # A D matrix is fitted on one checkpoint, so there is no single one valid for
+    # a whole sweep; ALL_TRIALS therefore never computes the RELU score.
+    selected_dirs=()
+    for trial_dir in "${all_trial_dirs[@]}"; do
+        trial_dir="${trial_dir%/}"
+        trial_name=$(basename "$trial_dir")
+        if [ -n "$TRIAL_FILTER" ] && [[ "$trial_name" != *"$TRIAL_FILTER"* ]]; then
+            continue
+        fi
+        if [ ! -f "$trial_dir/$CHECKPOINT_NAME" ]; then
+            echo "[SKIP] $trial_name: no $CHECKPOINT_NAME (still training or crashed)"
+            continue
+        fi
+        selected_dirs+=("$trial_dir")
+    done
+
+    total_trials="${#selected_dirs[@]}"
+    if [ "$total_trials" -eq 0 ]; then
+        echo "Nothing to test: no trial has a $CHECKPOINT_NAME matching TRIAL_FILTER='${TRIAL_FILTER:-}'."
+        exit 0
+    fi
+
+    # One contiguous chunk per array task, like grid_search.py shards the sweep.
+    # Outside an array job this runs every trial sequentially.
+    array_id="${SLURM_ARRAY_TASK_ID:-0}"
+    array_count="${SLURM_ARRAY_TASK_COUNT:-1}"
+    chunk_size=$(( (total_trials + array_count - 1) / array_count ))
+    start=$(( array_id * chunk_size ))
+    end=$(( start + chunk_size ))
+    if [ "$end" -gt "$total_trials" ]; then
+        end="$total_trials"
+    fi
+
+    echo
+    echo "ALL_TRIALS     : $total_trials trial(s), task $array_id/$array_count -> [$start, $end)"
+
+    if [ "$start" -ge "$total_trials" ]; then
+        echo "Task $array_id outside the trial list. Nothing to do."
+        exit 0
+    fi
+
+    executed=()
+    for (( idx = start; idx < end; idx++ )); do
+        trial_dir="${selected_dirs[$idx]}"
+        trial_name=$(basename "$trial_dir")
+        output_dir="$OUTPUT_ROOT/all_trials/$trial_name"
+        mkdir -p "$output_dir"
+
+        # Keeps the hyperparameters next to the metrics they produced.
+        if [ -f "$trial_dir/grid_trial.json" ]; then
+            cp "$trial_dir/grid_trial.json" "$output_dir/grid_trial.json"
+        fi
+
+        echo
+        echo "============================================================"
+        echo "Trial [$((idx + 1))/$total_trials]: $trial_name"
+
+        if run_trial_inference "$trial_name" "$trial_dir/$CHECKPOINT_NAME" "$output_dir" ""; then
+            executed+=("$trial_name")
+        else
+            executed+=("$trial_name (skipped, already tested)")
+        fi
+    done
+
+    echo
+    echo "Finished ALL_TRIALS inference."
+    for line in "${executed[@]}"; do
+        echo "  $line"
+    done
+    exit 0
+fi
 
 # Both selections can land on the same trial; inference then runs once and the
 # second criterion only records a pointer to the shared results.
@@ -276,14 +428,10 @@ for criterion in "${criteria[@]}"; do
       fpr95)          criterion_d_matrix="$D_MATRIX_FPR95" ;;
     esac
 
-    d_matrix_args=()
-    if [ -n "$criterion_d_matrix" ]; then
-        if [ ! -f "$criterion_d_matrix" ]; then
-            echo "ERROR: D matrix not found: $criterion_d_matrix"
-            echo "Produce it for this trial's checkpoint with compute_d_matrix.sh (SPLIT=val)."
-            exit 1
-        fi
-        d_matrix_args+=(--d-matrix "$criterion_d_matrix")
+    if [ -n "$criterion_d_matrix" ] && [ ! -f "$criterion_d_matrix" ]; then
+        echo "ERROR: D matrix not found: $criterion_d_matrix"
+        echo "Produce it for this trial's checkpoint with compute_d_matrix.sh (SPLIT=val)."
+        exit 1
     fi
 
     output_dir="$OUTPUT_ROOT/$criterion/$trial_name"
@@ -298,35 +446,12 @@ for criterion in "${criteria[@]}"; do
         continue
     fi
 
-    metrics_file="$output_dir/metrics.json"
-    if [ "$SKIP_EXISTING" = "1" ] && [ -f "$metrics_file" ]; then
-        echo "[SKIP] $trial_name: existing metrics found at $metrics_file"
-        ran_trials[$trial_name]="$criterion"
+    if run_trial_inference "$trial_name" "$checkpoint_path" "$output_dir" "$criterion_d_matrix"; then
+        executed+=("$criterion -> $trial_name")
+    else
         executed+=("$criterion -> $trial_name (skipped, already tested)")
-        continue
     fi
-
-    echo "Checkpoint: $checkpoint_path"
-    echo "Output    : $output_dir"
-    echo "D matrix  : ${criterion_d_matrix:-none (RELU score disabled)}"
-    echo "============================================================"
-
-    "$PYTHON_BIN" inference.py ${MODES} \
-      --checkpoint "$checkpoint_path" \
-      --dataset "$DATASET_ARG" \
-      --dataset-root "$DATASET_ROOT" \
-      --output-dir "$output_dir" \
-      --batch-size "$BATCH_SIZE" \
-      --device "$DEVICE" \
-      --num-samples "$NUM_SAMPLES" \
-      --temperature "$TEMPERATURE" \
-      --max-pixels-kde "$MAX_PIXELS_KDE" \
-      --energy-threshold "$ENERGY_THRESH" \
-      --msp-threshold "$MSP_THRESH" \
-      "${d_matrix_args[@]}"
-
     ran_trials[$trial_name]="$criterion"
-    executed+=("$criterion -> $trial_name")
 done
 
 echo

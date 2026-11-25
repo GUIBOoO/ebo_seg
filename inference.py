@@ -32,6 +32,33 @@ BASE_SCORE_NAMES = ("msp", "alpha", "beta", "energy", "hybrid_energy", "sirc")
 FIXED_SCORE_XLIM: Dict[str, Tuple[float, float]] = {"energy": (-80.0, 0.0)}
 
 
+def energy_threshold_arg(raw: str) -> float | None:
+    """--energy-threshold accepts a number or 'auto' (resolved after the pass)."""
+    if raw.strip().lower() == "auto":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number or 'auto', got '{raw}'") from None
+
+
+def parse_score_thresholds(raw_values: Iterable[str]) -> Dict[str, float]:
+    """Turn the repeatable --score-threshold NAME=VALUE flags into a dict."""
+    known = set(BASE_SCORE_NAMES) | {"relu"}
+    thresholds: Dict[str, float] = {}
+    for raw in raw_values:
+        name, separator, value = raw.partition("=")
+        name = name.strip().lower()
+        if not separator:
+            raise ValueError(f"--score-threshold expects NAME=VALUE, got '{raw}'")
+        if name not in known:
+            raise ValueError(
+                f"--score-threshold: unknown score '{name}'. Known scores: {', '.join(sorted(known))}"
+            )
+        thresholds[name] = float(value)
+    return thresholds
+
+
 def resolve_score_names(d_matrix: torch.Tensor | None) -> Tuple[str, ...]:
     """RELU needs a precomputed D matrix, so it is only scored when one is given."""
     return BASE_SCORE_NAMES + (("relu",) if d_matrix is not None else ())
@@ -75,8 +102,41 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--num-samples", type=int, default=4)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--max-pixels-kde", type=int, default=200000)
-    parser.add_argument("--energy-threshold", type=float, default=-25.0)
+    parser.add_argument(
+        "--energy-threshold",
+        type=energy_threshold_arg,
+        default=-25.0,
+        help="Energy cut behind dice_identified_correct and energy_below_threshold. "
+        "A number is used as is; 'auto' puts energy on the same operating point as "
+        "every other score, i.e. the energy value that flags --score-tpr of the errors.",
+    )
     parser.add_argument("--msp-threshold", type=float, default=0.9)
+    parser.add_argument(
+        "--score-threshold",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Absolute threshold for one score in the 'segmentation.score_thresholds' "
+        "block, written in the convention shared by every score map: the higher the "
+        "score, the more suspicious the pixel, so the kept pixels are score < VALUE. "
+        "Repeatable, e.g. --score-threshold sirc=2.5 --score-threshold alpha=-1. "
+        "Scores left out fall back to their --score-tpr operating point.",
+    )
+    parser.add_argument(
+        "--score-tpr",
+        type=float,
+        default=0.95,
+        help="Default operating point for the score_thresholds block: each score is "
+        "cut where it flags this fraction of the error pixels, which is the same "
+        "point the reported FPR95 describes.",
+    )
+    parser.add_argument(
+        "--score-threshold-max-pixels",
+        type=int,
+        default=2_000_000,
+        help="Pixels sampled to locate the --score-tpr thresholds. The metrics "
+        "themselves always use every pixel. 0 disables the subsampling.",
+    )
     parser.add_argument(
         "--d-matrix",
         type=Path,
@@ -145,6 +205,149 @@ def _compute_score_maps(
         scores["relu"] = relu_score(relu_probs, d_matrix)
     return scores
 
+def _threshold_at_tpr(
+    labels: np.ndarray,
+    scores: np.ndarray,
+    target_tpr: float,
+    max_pixels: int,
+) -> Tuple[float | None, float | None]:
+    """Score value at which `target_tpr` of the error pixels are flagged.
+
+    Every score map follows the same convention: the higher, the more suspicious.
+    A pixel is therefore *rejected* when `score >= threshold`, which is exactly
+    how roc_curve defines its thresholds, and the FPR95 already reported is the
+    false positive rate at this very point. Estimating it on a subsample keeps
+    the extra sort cheap; the metrics themselves use every pixel.
+    """
+    if labels.size == 0 or np.unique(labels).size < 2:
+        return None, None
+
+    if 0 < max_pixels < labels.size:
+        rng = np.random.default_rng(42)
+        indices = rng.choice(labels.size, size=max_pixels, replace=False)
+        labels = labels[indices]
+        scores = scores[indices]
+
+    _, tpr, thresholds = roc_curve(labels, scores)
+    reached = np.where(tpr >= target_tpr)[0]
+    if reached.size == 0:
+        return None, None
+    idx = int(reached[0])
+    return float(thresholds[idx]), float(tpr[idx])
+
+
+def _segmentation_metrics_from_arrays(
+    preds: np.ndarray,
+    targets: np.ndarray,
+    num_classes: int,
+) -> Tuple[float, float, float]:
+    if preds.size == 0:
+        return float("nan"), float("nan"), float("nan")
+    pred_tensor = torch.from_numpy(preds.astype(np.int64, copy=False))
+    target_tensor = torch.from_numpy(targets.astype(np.int64, copy=False))
+    if num_classes == 1:
+        return compute_binary_metrics_from_preds(pred_tensor, target_tensor)
+    return compute_multiclass_metrics_from_preds(pred_tensor, target_tensor, num_classes)
+
+
+def _macro_dice_over_batches(
+    preds: np.ndarray,
+    targets: np.ndarray,
+    kept: np.ndarray,
+    batch_sizes: List[int],
+    num_classes: int,
+) -> float:
+    """Dice of the kept pixels averaged per batch, batches keeping none skipped.
+
+    Matches what the evaluation loop used to accumulate on the fly; it is only
+    computed afterwards now, so the threshold no longer has to be known upfront.
+    """
+    total = 0.0
+    counted = 0
+    start = 0
+    for size in batch_sizes:
+        stop = start + size
+        batch_kept = kept[start:stop]
+        if batch_kept.any():
+            dice, _, _ = _segmentation_metrics_from_arrays(
+                preds[start:stop][batch_kept],
+                targets[start:stop][batch_kept],
+                num_classes,
+            )
+            total += dice
+            counted += 1
+        start = stop
+    return total / counted if counted else float("nan")
+
+
+def _score_threshold_metrics(
+    preds: np.ndarray,
+    targets: np.ndarray,
+    labels: np.ndarray,
+    scores: Dict[str, np.ndarray],
+    num_classes: int,
+    explicit_thresholds: Dict[str, float],
+    target_tpr: float,
+    max_pixels_threshold: int,
+) -> Dict[str, dict]:
+    """Segmentation quality of the pixels each score keeps, one entry per score.
+
+    `energy_below_threshold` and `msp_above_threshold` answer the same question
+    for two hand-picked absolute thresholds. Those two numbers are not
+    comparable across scores, so the default here is the operating point where
+    each score flags `target_tpr` of the errors: every score then rejects the
+    same share of the errors and only the pixels it sacrifices differ.
+    """
+    blocks: Dict[str, dict] = {}
+    for name in _present_score_names(scores):
+        score = scores[name]
+        explicit = explicit_thresholds.get(name)
+        if explicit is not None:
+            threshold: float | None = float(explicit)
+            achieved_tpr: float | None = None
+            source = "explicit"
+        else:
+            threshold, achieved_tpr = _threshold_at_tpr(labels, score, target_tpr, max_pixels_threshold)
+            source = f"tpr>={target_tpr:g}"
+
+        block: dict = {
+            "threshold": threshold,
+            "threshold_source": source,
+            "rule": "kept pixels are score < threshold",
+        }
+        if explicit is None:
+            block["target_tpr"] = target_tpr
+            block["achieved_tpr"] = achieved_tpr
+
+        if threshold is None:
+            block.update(
+                {
+                    "num_pixels": 0,
+                    "frac_pixels": float("nan"),
+                    "dice": float("nan"),
+                    "iou": float("nan"),
+                    "pixel_acc": float("nan"),
+                }
+            )
+            blocks[name] = block
+            continue
+
+        kept = score < threshold
+        num_kept = int(kept.sum())
+        dice, iou, pixel_acc = _segmentation_metrics_from_arrays(preds[kept], targets[kept], num_classes)
+        block.update(
+            {
+                "num_pixels": num_kept,
+                "frac_pixels": float(num_kept / score.size) if score.size else float("nan"),
+                "dice": dice,
+                "iou": iou,
+                "pixel_acc": pixel_acc,
+            }
+        )
+        blocks[name] = block
+    return blocks
+
+
 def _compute_detection_metrics(labels: np.ndarray, scores: np.ndarray) -> Dict[str, float | None]:
     if labels.size == 0 or np.unique(labels).size < 2:
         return {"auroc": None, "aupr": None, "fpr95": None}
@@ -198,9 +401,12 @@ def evaluate(
     device: torch.device,
     num_classes: int,
     temperature: float,
-    energy_threshold: float,
+    energy_threshold: float | None,
     msp_threshold: float,
     d_matrix: torch.Tensor | None = None,
+    score_thresholds: Dict[str, float] | None = None,
+    score_tpr: float = 0.95,
+    score_threshold_max_pixels: int = 2_000_000,
 ) -> Tuple[dict, Dict[str, np.ndarray], List[dict]]:
     total_dice = 0.0
     total_iou = 0.0
@@ -212,21 +418,18 @@ def evaluate(
     num_hd95_defined = 0
     num_hd95_undefined = 0
 
-    # Dice restricted to the pixels the energy detector calls correct, averaged
-    # per batch so it is directly comparable to `dice` above. The pooled variant
-    # over the whole test set lives in the energy_below_threshold block.
-    total_identified_correct_dice = 0.0
-    num_identified_correct_batches = 0
-
     error_labels: List[np.ndarray] = []
+    # Predictions and targets of the whole test set, kept so any score can be
+    # thresholded after the pass. uint8 is enough for every dataset here and
+    # costs far less than the per-score lists of selected pixels.
+    label_dtype = np.uint8 if num_classes <= 256 else np.int16
+    all_preds: List[np.ndarray] = []
+    all_targets: List[np.ndarray] = []
     score_values = {name: [] for name in resolve_score_names(d_matrix)}
     per_sample: List[dict] = []
-    energy_filtered_preds: List[torch.Tensor] = []
-    energy_filtered_targets: List[torch.Tensor] = []
-    msp_filtered_preds: List[torch.Tensor] = []
-    msp_filtered_targets: List[torch.Tensor] = []
-    num_energy_selected_pixels = 0
-    num_msp_selected_pixels = 0
+    # Length of each batch in the flattened arrays, so the per-batch averages can
+    # be rebuilt after the pass, once the thresholds are known.
+    batch_sizes: List[int] = []
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm.tqdm(loader, desc="Inference")):
@@ -258,37 +461,6 @@ def evaluate(
                     print("NaN:", np.isnan(arr).sum(), "Inf:", np.isinf(arr).sum())
                     print("Min:", np.nanmin(arr), "Max:", np.nanmax(arr))
             error_map = (preds != masks).long()
-            energy_mask = scores["energy"] < energy_threshold
-            energy_selected = int(energy_mask.sum().item())
-            num_energy_selected_pixels += energy_selected
-
-            if energy_selected > 0:
-                selected_batch_preds = preds[energy_mask].detach().cpu()
-                selected_batch_targets = masks[energy_mask].detach().cpu()
-                energy_filtered_preds.append(selected_batch_preds)
-                energy_filtered_targets.append(selected_batch_targets)
-
-                if num_classes == 1:
-                    identified_correct_dice, _, _ = compute_binary_metrics_from_preds(
-                        selected_batch_preds,
-                        selected_batch_targets,
-                    )
-                else:
-                    identified_correct_dice, _, _ = compute_multiclass_metrics_from_preds(
-                        selected_batch_preds,
-                        selected_batch_targets,
-                        num_classes,
-                    )
-                total_identified_correct_dice += identified_correct_dice
-                num_identified_correct_batches += 1
-
-            msp_mask = (-scores["msp"]) > msp_threshold
-            msp_selected = int(msp_mask.sum().item())
-            num_msp_selected_pixels += msp_selected
-
-            if msp_selected > 0:
-                msp_filtered_preds.append(preds[msp_mask].detach().cpu())
-                msp_filtered_targets.append(masks[msp_mask].detach().cpu())
 
             total_dice += dice
             total_iou += iou
@@ -296,6 +468,9 @@ def evaluate(
             num_batches += 1
 
             error_labels.append(error_map.reshape(-1).cpu().numpy())
+            all_preds.append(preds.reshape(-1).cpu().numpy().astype(label_dtype, copy=False))
+            all_targets.append(masks.reshape(-1).cpu().numpy().astype(label_dtype, copy=False))
+            batch_sizes.append(int(error_map.numel()))
             for name, tensor in scores.items():
                 score_values[name].append(tensor.reshape(-1).detach().cpu().numpy())
 
@@ -322,63 +497,6 @@ def evaluate(
         "hd95": total_hd95 / num_hd95_batches if num_hd95_batches > 0 else float("nan"),
         "hd95_num_defined_pairs": num_hd95_defined,
         "hd95_num_undefined_pairs": num_hd95_undefined,
-        # Dice over the pixels the energy detector identifies as correct.
-        "dice_identified_correct": (
-            total_identified_correct_dice / num_identified_correct_batches
-            if num_identified_correct_batches > 0
-            else float("nan")
-        ),
-        "dice_identified_correct_threshold": energy_threshold,
-    }
-
-    if num_energy_selected_pixels > 0:
-        selected_preds = torch.cat(energy_filtered_preds)
-        selected_targets = torch.cat(energy_filtered_targets)
-        if num_classes == 1:
-            energy_filtered_dice, energy_filtered_iou, energy_filtered_acc = compute_binary_metrics_from_preds(
-                selected_preds,
-                selected_targets,
-            )
-        else:
-            energy_filtered_dice, energy_filtered_iou, energy_filtered_acc = compute_multiclass_metrics_from_preds(
-                selected_preds,
-                selected_targets,
-                num_classes,
-            )
-    else:
-        energy_filtered_dice, energy_filtered_iou, energy_filtered_acc = float("nan"), float("nan"), float("nan")
-
-    segmentation_metrics["energy_below_threshold"] = {
-        "threshold": energy_threshold,
-        "num_pixels": num_energy_selected_pixels,
-        "dice": energy_filtered_dice,
-        "iou": energy_filtered_iou,
-        "pixel_acc": energy_filtered_acc,
-    }
-
-    if num_msp_selected_pixels > 0:
-        selected_preds = torch.cat(msp_filtered_preds)
-        selected_targets = torch.cat(msp_filtered_targets)
-        if num_classes == 1:
-            msp_filtered_dice, msp_filtered_iou, msp_filtered_acc = compute_binary_metrics_from_preds(
-                selected_preds,
-                selected_targets,
-            )
-        else:
-            msp_filtered_dice, msp_filtered_iou, msp_filtered_acc = compute_multiclass_metrics_from_preds(
-                selected_preds,
-                selected_targets,
-                num_classes,
-            )
-    else:
-        msp_filtered_dice, msp_filtered_iou, msp_filtered_acc = float("nan"), float("nan"), float("nan")
-
-    segmentation_metrics["msp_above_threshold"] = {
-        "threshold": msp_threshold,
-        "num_pixels": num_msp_selected_pixels,
-        "dice": msp_filtered_dice,
-        "iou": msp_filtered_iou,
-        "pixel_acc": msp_filtered_acc,
     }
 
     flattened_labels = np.concatenate(error_labels) if error_labels else np.array([], dtype=np.int64)
@@ -386,6 +504,76 @@ def evaluate(
         name: np.concatenate(chunks) if chunks else np.array([], dtype=np.float32)
         for name, chunks in score_values.items()
     }
+
+    flattened_preds = np.concatenate(all_preds) if all_preds else np.array([], dtype=label_dtype)
+    flattened_targets = np.concatenate(all_targets) if all_targets else np.array([], dtype=label_dtype)
+
+    # energy_threshold=None asks for the same operating point the other scores
+    # use by default: the energy value that flags `score_tpr` of the errors.
+    energy_scores = flattened_scores.get("energy", np.array([], dtype=np.float32))
+    if energy_threshold is None:
+        resolved_energy_threshold, energy_achieved_tpr = _threshold_at_tpr(
+            flattened_labels, energy_scores, score_tpr, score_threshold_max_pixels
+        )
+        energy_threshold_source = f"tpr>={score_tpr:g}"
+    else:
+        resolved_energy_threshold = float(energy_threshold)
+        energy_achieved_tpr = None
+        energy_threshold_source = "explicit"
+
+    if resolved_energy_threshold is None:
+        energy_kept = np.zeros(energy_scores.size, dtype=bool)
+    else:
+        energy_kept = energy_scores < resolved_energy_threshold
+    energy_dice, energy_iou, energy_acc = _segmentation_metrics_from_arrays(
+        flattened_preds[energy_kept], flattened_targets[energy_kept], num_classes
+    )
+
+    # Same pixels as energy_below_threshold, averaged per batch instead of
+    # pooled, so it stays comparable to `dice` above.
+    segmentation_metrics["dice_identified_correct"] = _macro_dice_over_batches(
+        flattened_preds, flattened_targets, energy_kept, batch_sizes, num_classes
+    )
+    segmentation_metrics["dice_identified_correct_threshold"] = resolved_energy_threshold
+
+    segmentation_metrics["energy_below_threshold"] = {
+        "threshold": resolved_energy_threshold,
+        "threshold_source": energy_threshold_source,
+        "num_pixels": int(energy_kept.sum()),
+        "dice": energy_dice,
+        "iou": energy_iou,
+        "pixel_acc": energy_acc,
+    }
+    if energy_threshold is None:
+        segmentation_metrics["energy_below_threshold"]["target_tpr"] = score_tpr
+        segmentation_metrics["energy_below_threshold"]["achieved_tpr"] = energy_achieved_tpr
+
+    # scores["msp"] holds -max_softmax, so "max_softmax > t" is "score < -t".
+    msp_scores = flattened_scores.get("msp", np.array([], dtype=np.float32))
+    msp_kept = msp_scores < -msp_threshold
+    msp_dice, msp_iou, msp_acc = _segmentation_metrics_from_arrays(
+        flattened_preds[msp_kept], flattened_targets[msp_kept], num_classes
+    )
+    segmentation_metrics["msp_above_threshold"] = {
+        "threshold": msp_threshold,
+        "num_pixels": int(msp_kept.sum()),
+        "dice": msp_dice,
+        "iou": msp_iou,
+        "pixel_acc": msp_acc,
+    }
+
+    segmentation_metrics["score_thresholds"] = _score_threshold_metrics(
+        preds=flattened_preds,
+        targets=flattened_targets,
+        labels=flattened_labels,
+        scores=flattened_scores,
+        num_classes=num_classes,
+        explicit_thresholds=score_thresholds or {},
+        target_tpr=score_tpr,
+        max_pixels_threshold=score_threshold_max_pixels,
+    )
+    del flattened_preds, flattened_targets, all_preds, all_targets
+
     return segmentation_metrics, {"labels": flattened_labels, **flattened_scores}, per_sample
 
 
@@ -535,12 +723,17 @@ def save_visualizations(
 
 
 def main() -> None:
-    args = build_argparser().parse_args()
+    parser = build_argparser()
+    args = parser.parse_args()
     modes = set(args.modes)
     if "all" in modes:
         modes = {"metrics", "distrib", "visu"}
 
     device = resolve_device(args.device)
+    try:
+        score_thresholds = parse_score_thresholds(args.score_threshold)
+    except ValueError as error:
+        parser.error(str(error))
 
     dataset_root = args.dataset_root
     if dataset_root is None:
@@ -584,6 +777,9 @@ def main() -> None:
         energy_threshold=args.energy_threshold,
         msp_threshold=args.msp_threshold,
         d_matrix=d_matrix,
+        score_thresholds=score_thresholds,
+        score_tpr=args.score_tpr,
+        score_threshold_max_pixels=args.score_threshold_max_pixels,
     )
 
     run_metadata = {
@@ -594,8 +790,10 @@ def main() -> None:
         "batch_size": args.batch_size,
         "num_classes": num_classes,
         "modes": sorted(modes),
-        "energy_threshold": args.energy_threshold,
+        "energy_threshold": "auto" if args.energy_threshold is None else args.energy_threshold,
         "msp_threshold": args.msp_threshold,
+        "score_thresholds": score_thresholds,
+        "score_tpr": args.score_tpr,
     }
     # Inference can take minutes; recreate the directory in case it was removed
     # in the meantime, rather than losing the whole pass on a write error.

@@ -111,6 +111,15 @@ TEMPERATURE="${TEMPERATURE:-1.0}"
 MAX_PIXELS_KDE="${MAX_PIXELS_KDE:-200000}"
 ENERGY_THRESH="${ENERGY_THRESH:--5}"
 MSP_THRESH="${MSP_THRESH:-0.999}"
+# segmentation.score_thresholds: operating point shared by every score (energy,
+# msp, alpha, beta, sirc, hybrid_energy, relu). SCORE_THRESHOLDS pins a score to
+# an absolute value instead, space separated, e.g. SCORE_THRESHOLDS="sirc=2.5 alpha=-1".
+SCORE_TPR="${SCORE_TPR:-0.95}"
+SCORE_THRESHOLDS="${SCORE_THRESHOLDS:-}"
+score_threshold_args=()
+for score_spec in $SCORE_THRESHOLDS; do
+    score_threshold_args+=(--score-threshold "$score_spec")
+done
 MODES="${MODES:-all}"
 
 LAMBDA_WEIGHT="${LAMBDA_WEIGHT:-0.5}"
@@ -161,4 +170,6 @@ echo "D matrix     : ${D_MATRIX:-none (RELU score disabled)}"
   --max-pixels-kde "${MAX_PIXELS_KDE}" \
   --energy-threshold "${ENERGY_THRESH}" \
   --msp-threshold "${MSP_THRESH}" \
+  --score-tpr "${SCORE_TPR}" \
+  "${score_threshold_args[@]}" \
   "${d_matrix_args[@]}"
